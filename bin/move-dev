@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# move-dev: move a projects folder to ~/Development and leave a symlink at the old path,
+# so whatever used the old path keeps working. Optionally link more agents' folders to it.
+#
+#   move-dev <old-path> [extra-link ...]
+#   move-dev ~/old/projects
+#
+# Dry run first with DRY=1. Refuses to overwrite anything.
+set -eu
+
+DEST="${DEST:-$HOME/Development}"
+run() { echo "+ $*"; [ -n "${DRY:-}" ] || "$@"; }
+die() { echo "move-dev: $*" >&2; exit 1; }
+
+[ $# -ge 1 ] || die "usage: move-dev <old-path> [extra-link ...]"
+src="${1%/}"; shift
+
+[ -L "$src" ] && die "$src is already a symlink (to $(readlink "$src")); nothing to move"
+[ -d "$src" ] || die "$src is not a folder"
+if [ -e "$DEST" ] || [ -L "$DEST" ]; then
+    die "$DEST already exists; move or merge it by hand first"
+fi
+for l in "$@"; do
+    { [ -e "$l" ] || [ -L "$l" ]; } && die "$l already exists; not replacing it"
+done
+
+# Something with open files or a cwd inside the folder (an agent, a shell) would keep
+# working on a renamed inode but should be restarted afterwards. Warn about them.
+if command -v lsof >/dev/null; then
+    users="$(lsof +D "$src" 2>/dev/null | awk 'NR>1 {print $1" (pid "$2")"}' | sort -u | head -20)"
+    [ -n "$users" ] && { echo "still using $src (restart these afterwards):"; echo "$users" | sed 's/^/  /'; }
+fi
+
+# A container that bind-mounts the old path (or a parent) can't follow a symlink out of
+# its mount, so it would see a dangling link. Those need a bind mount of $DEST instead.
+if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
+    hits="$(docker ps --format '{{.Names}}' | while read -r c; do
+        docker inspect -f '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' "$c" | while read -r m; do
+            [ -n "$m" ] || continue
+            case "$src/" in "$m"/*) echo "$c mounts $m" ;; esac
+        done
+    done)"
+    if [ -n "$hits" ]; then
+        echo "WARNING: these containers mount the folder; a symlink won't work inside them:"
+        echo "$hits" | sed 's/^/  /'
+        echo "Add a bind mount of $DEST at the same in-container path, then re-run with FORCE=1."
+        [ -n "${FORCE:-}" ] || exit 1
+    fi
+fi
+
+run mkdir -p "$(dirname "$DEST")"
+run mv "$src" "$DEST"
+run ln -s "$DEST" "$src"
+for l in "$@"; do
+    run mkdir -p "$(dirname "$l")"
+    run ln -s "$DEST" "$l"
+done
+[ -n "${DRY:-}" ] && { echo "(dry run, nothing changed)"; exit 0; }
+echo "done: $DEST is the real folder; $src now links to it"
+echo "undo: rm '$src' && mv '$DEST' '$src'"

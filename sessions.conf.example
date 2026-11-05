@@ -1,0 +1,38 @@
+# rct sessions: one `claude remote-control` server per line, each in its own
+# tmux window named after the session. Edit with `rct edit`, then `rct up`
+# (new lines) or `rct restart <name>` (changed lines).
+#
+#   <name>   <folder>   [options]
+#
+# name     tmux window name and the session title at claude.ai/code. Keep it short,
+#          no spaces. `rct a <name>` jumps straight to it.
+# folder   where the server runs. ~ is fine. Avoid ~ itself: Claude Code never saves
+#          trust for the home folder, so it would ask on every start.
+# options  chrome=on|off       let sessions use Claude in Chrome on this machine
+#          mode=<mode>         starting permission mode: default, acceptEdits, plan, auto
+#          spawn=same-dir|worktree   worktree gives each new session its own git worktree.
+#                              In a git folder with no spawn=, rct uses same-dir.
+#          capacity=<N>        max concurrent sessions (default 32)
+#          model=<model>       model for the sessions: opus, sonnet, or a full model id
+#          effort=<level>      PIN effort (low, medium, high, xhigh, max). For a default you can
+#                              still change from the app, set "effortLevel" in ~/.claude/settings.json
+#          host=<glob>         only start on matching machines (`hostname -s`), so one
+#                              file can be shared between this Mac and the headless box
+#          --any-flag          passed straight to `claude remote-control`
+#
+# A `default` line sets options for every line below it. Several `default` lines
+# add up, and a later value for the same key wins. `default clear` starts over.
+
+default chrome=on model=opus
+
+# --- Personal -------------------------------------------------------------
+dev          ~/Development
+blog         ~/Development/blog
+
+# --- Work (kept separate from personal) -----------------------------------
+work         ~/Development/work
+work-api     ~/Development/work/api
+
+# --- Headless box: no one watching, so no Chrome unless asked -------------
+# default chrome=off host=mini*
+# mini-dev     ~/Development

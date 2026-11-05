@@ -1,0 +1,476 @@
+#!/usr/bin/env bash
+# rct: run one `claude remote-control` server per folder, each in its own tmux window.
+#
+# Config:  ~/.config/rc-tmux/sessions.conf   (one line per session, see sessions.conf.example)
+# State:   ~/.config/rc-tmux/state/          (chrome overrides, last-run stamps)
+# Logs:    ~/.config/rc-tmux/logs/
+#
+# Works with the bash 3.2 that ships with macOS, so no associative arrays.
+
+set -u
+
+RC_HOME="${RC_HOME:-$HOME/.config/rc-tmux}"
+RC_CONF="${RC_CONF:-$RC_HOME/sessions.conf}"
+RC_STATE="$RC_HOME/state"
+RC_LOGS="$RC_HOME/logs"
+RC_TMUX="${RC_TMUX:-rc}"              # tmux session that holds one window per RC server
+RESUME_WINDOW=$((4 * 3600))          # docs: stopped servers can be brought back for ~4 hours
+
+# Per-machine overrides (chrome default, update policy, PATH tweaks) live here.
+[ -f "$RC_HOME/local.env" ] && . "$RC_HOME/local.env"
+RC_CHROME_DEFAULT="${RC_CHROME_DEFAULT:-unset}"   # on | off | unset
+RC_RESTART_AFTER_UPDATE="${RC_RESTART_AFTER_UPDATE:-always}"   # always | changed | never
+RC_BREW_UPGRADE_DAYS="${RC_BREW_UPGRADE_DAYS:-7}"              # 0 turns the brew upgrade off
+
+mkdir -p "$RC_STATE" "$RC_LOGS"
+
+die()  { echo "rct: $*" >&2; exit 1; }
+note() { echo "rct: $*"; }
+host() { hostname -s 2>/dev/null || hostname; }
+
+# ---------------------------------------------------------------------------
+# Config parsing
+#
+# Each line:  <name>  <folder>  [key=value ...] [--extra-claude-flag ...]
+#   chrome=on|off        Chrome integration for sessions this server creates
+#   mode=<perm-mode>     --permission-mode (default, acceptEdits, plan, auto, ...)
+#   spawn=same-dir|worktree|session
+#   capacity=<N>
+#   model=<model>        model for the sessions (opus, sonnet, or a full model id)
+#   effort=<level>       pin the effort level (low..max); see effortLevel in settings for a soft default
+#   host=<glob>          only start on machines whose short hostname matches
+# Lines starting with `default` add key=value defaults for the lines below them;
+# `default clear` drops them all.
+# ---------------------------------------------------------------------------
+
+# Emits "name<TAB>folder<TAB>opts" for every entry that applies to this host.
+entries() {
+    [ -f "$RC_CONF" ] || die "no config at $RC_CONF (run: rct init)"
+    local defaults="" line name folder rest h me
+    me="$(host)"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        # shellcheck disable=SC2086
+        set -- $line
+        [ $# -eq 0 ] && continue
+        if [ "$1" = "default" ]; then
+            # defaults add up (a later key=value wins); `default clear` starts over
+            shift
+            if [ "${1:-}" = "clear" ]; then defaults=""; else defaults="$defaults $*"; fi
+            continue
+        fi
+        [ $# -lt 2 ] && { echo "rct: skipping bad line: $line" >&2; continue; }
+        name="$1"; folder="$2"; shift 2
+        rest="$defaults $*"
+        h="$(opt host "$rest")"
+        if [ -n "$h" ]; then
+            # shellcheck disable=SC2254
+            case "$me" in $h) ;; *) continue ;; esac
+        fi
+        case "$folder" in "~"/*) folder="$HOME/${folder#\~/}" ;; "~") folder="$HOME" ;; esac
+        printf '%s\t%s\t%s\n' "$name" "$folder" "$rest"
+    done < "$RC_CONF"
+}
+
+# opt <key> <opts>: last key=value wins, so per-line options override `default`.
+opt() {
+    local key="$1" val="" tok
+    for tok in $2; do
+        case "$tok" in "$key="*) val="${tok#*=}" ;; esac
+    done
+    echo "$val"
+}
+
+entry() {
+    entries | awk -F'\t' -v n="$1" '$1 == n { print; found=1 } END { exit !found }' \
+        || die "no session named '$1' in $RC_CONF for host $(host)"
+}
+
+names() { entries | cut -f1; }
+
+# Chrome resolution: `rct chrome` override > config line > local.env default.
+chrome_for() {
+    local name="$1" opts="$2" c
+    if [ -f "$RC_STATE/$name.chrome" ]; then
+        c="$(cat "$RC_STATE/$name.chrome")"
+    else
+        c="$(opt chrome "$opts")"
+        [ -z "$c" ] && c="$RC_CHROME_DEFAULT"
+    fi
+    echo "$c"
+}
+
+# ---------------------------------------------------------------------------
+# tmux helpers
+# ---------------------------------------------------------------------------
+
+have_session() { tmux has-session -t "=$RC_TMUX" 2>/dev/null; }
+have_window()  { have_session && tmux list-windows -t "=$RC_TMUX" -F '#W' | grep -qx "$1"; }
+
+# pid of the claude process running under a window's loop, if any
+claude_pid() {
+    local pane
+    pane="$(tmux display-message -p -t "=$RC_TMUX:$1" '#{pane_pid}' 2>/dev/null)" || return 1
+    # only the claude child: during a restart back-off the child is `sleep`.
+    # Not pgrep: it never lists its own ancestors, so from inside a session this
+    # server spawned, its own server would look stopped.
+    ps -A -o pid= -o ppid= -o command= 2>/dev/null \
+        | awk -v p="$pane" '$2 == p && /claude remote-control/ { print $1; exit }'
+}
+
+# True when the window's last line is a question claude is waiting on, such as
+# `Choose [1/2]` or `Trust <dir>? [y/N]`. Nothing answers those but `rct a`.
+at_prompt() {
+    tmux capture-pane -p -t "=$RC_TMUX:$1" 2>/dev/null | awk 'NF { last = $0 } END { exit !(last ~ /\[[^]]*\/[^]]*\]|\(y\/n\)/) }'
+}
+
+# Absolute path to this script, so tmux windows never pick up some other `rct` on PATH.
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+self() { echo "$SELF"; }
+
+# The script's mtime. Each window's loop records the one it started with, because
+# a running loop keeps the code it read at start and never sees later edits.
+script_mtime() { stat -f %m "$SELF" 2>/dev/null || stat -c %Y "$SELF"; }
+loop_is_stale() { [ "$(cat "$RC_STATE/$1.loop" 2>/dev/null)" != "$(script_mtime)" ]; }
+
+start_one() {
+    local name="$1"
+    entry "$name" >/dev/null || return 1
+    rm -f "$RC_STATE/$name.hold"
+    if have_window "$name"; then
+        note "$name already running"; return 0
+    fi
+    local cmd
+    cmd="$(printf '%q _run %q' "$(self)" "$name")"
+    if have_session; then
+        tmux new-window -d -t "=$RC_TMUX:" -n "$name" "$cmd"
+    else
+        tmux new-session -d -s "$RC_TMUX" -n "$name" "$cmd"
+            fi
+    note "started $name"
+}
+
+# Ctrl-C is the documented way to stop a server without archiving its sessions.
+interrupt_one() {
+    local name="$1" pid i
+    have_window "$name" || return 0
+    pid="$(claude_pid "$name")"
+    [ -z "$pid" ] && return 0
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        kill -0 "$pid" 2>/dev/null || return 0
+        # another Ctrl-C after a few seconds in case the first one only asked to confirm
+        case "$i" in 1|4|8) tmux send-keys -t "=$RC_TMUX:$name" C-c ;; esac
+        sleep 2
+    done
+    note "$name did not stop on Ctrl-C; killing it"
+    kill "$pid" 2>/dev/null
+}
+
+stop_one() {
+    local name="$1"
+    touch "$RC_STATE/$name.hold"       # tells the _run loop not to restart
+    interrupt_one "$name"
+    have_window "$name" && tmux kill-window -t "=$RC_TMUX:$name"
+    note "stopped $name"
+}
+
+restart_one() {
+    local name="$1"
+    if have_window "$name" && loop_is_stale "$name"; then
+        # the loop is running an older rct: replace the whole window, not just claude
+        stop_one "$name"
+        start_one "$name"
+    elif have_window "$name"; then
+        rm -f "$RC_STATE/$name.hold"
+        touch "$RC_STATE/$name.restart"  # tells the _run loop to start again right away
+        interrupt_one "$name"
+        note "restarted $name"
+    else
+        start_one "$name"
+    fi
+}
+
+# `rct restart` with no names also applies config edits: sessions removed from the
+# config are stopped, new ones started, and everything else restarted.
+restart_cmd() {
+    if [ $# -gt 0 ] && [ "$1" != "all" ]; then
+        for n in "$@"; do restart_one "$n"; done; return
+    fi
+    local n w want
+    want="$(names)"
+    if have_session; then
+        for w in $(tmux list-windows -t "=$RC_TMUX" -F '#W'); do
+            echo "$want" | grep -qx "$w" || stop_one "$w"
+        done
+    fi
+    for n in $want; do restart_one "$n"; done
+}
+
+targets() {
+    # "all" or nothing -> every configured session; otherwise the names given
+    if [ $# -eq 0 ] || [ "$1" = "all" ]; then names; else printf '%s\n' "$@"; fi
+}
+
+# ---------------------------------------------------------------------------
+# The loop that runs inside each tmux window
+# ---------------------------------------------------------------------------
+
+run_loop() {
+    local name="$1" line folder opts chrome mode spawn cap model effort tok backoff=10 started now last
+    # Survive Ctrl-C ourselves; only the claude child should die from it.
+    trap 'true' INT
+    # Remote Control and Chrome need the claude.ai subscription login. An API key or
+    # gateway in the environment would switch sessions to API billing, so drop them.
+    unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN ANTHROPIC_BASE_URL CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX
+    script_mtime > "$RC_STATE/$name.loop"
+    while :; do
+        line="$(entry "$name")" || { sleep 60; continue; }
+        folder="$(echo "$line" | cut -f2)"
+        opts="$(echo "$line" | cut -f3)"
+        cd "$folder" 2>/dev/null || { echo "rct: folder missing: $folder (fix $RC_CONF)"; sleep 300; continue; }
+
+        set -- remote-control
+        # Within the resume window a plain start brings back the sessions this
+        # folder's last server was serving, so skip --name to avoid a new one.
+        last="$(cat "$RC_STATE/$name.stopped" 2>/dev/null || echo 0)"
+        now="$(date +%s)"
+        if [ $((now - last)) -gt "$RESUME_WINDOW" ]; then
+            set -- "$@" --name "$name"
+        fi
+        set -- "$@" --remote-control-session-name-prefix "$(host)-$name"
+        chrome="$(chrome_for "$name" "$opts")"
+        case "$chrome" in on) set -- "$@" --chrome ;; off) set -- "$@" --no-chrome ;; esac
+        mode="$(opt mode "$opts")";      [ -n "$mode" ]  && set -- "$@" --permission-mode "$mode"
+        spawn="$(opt spawn "$opts")"
+        # In a git folder claude asks same-dir or worktree on every start, and nobody
+        # is there to answer. same-dir is its own default answer.
+        if [ -z "$spawn" ] && git -C "$folder" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            spawn="same-dir"
+        fi
+        [ -n "$spawn" ] && set -- "$@" --spawn "$spawn"
+        cap="$(opt capacity "$opts")";   [ -n "$cap" ]   && set -- "$@" --capacity "$cap"
+        # --model isn't carried into the sessions a server creates; the env var is.
+        model="$(opt model "$opts")"
+        if [ -n "$model" ]; then export ANTHROPIC_MODEL="$model"; else unset ANTHROPIC_MODEL; fi
+        # effort= pins the level: the session refuses other picks from a connected device.
+        # For a changeable default use "effortLevel" in ~/.claude/settings.json instead.
+        effort="$(opt effort "$opts")"
+        if [ -n "$effort" ]; then export CLAUDE_CODE_EFFORT_LEVEL="$effort"; else unset CLAUDE_CODE_EFFORT_LEVEL; fi
+        for tok in $opts; do case "$tok" in --*) set -- "$@" "$tok" ;; esac; done
+
+        printf '\n[%s] %s: claude %s\n  in %s%s\n\n' "$(date '+%F %T')" "$name" "$*" "$folder" "${ANTHROPIC_MODEL:+  model $ANTHROPIC_MODEL}${CLAUDE_CODE_EFFORT_LEVEL:+  effort $CLAUDE_CODE_EFFORT_LEVEL}" \
+            | tee -a "$RC_LOGS/$name.log"
+        started="$(date +%s)"
+        claude "$@"
+        echo "[$(date '+%F %T')] $name: claude exited ($?)" | tee -a "$RC_LOGS/$name.log"
+        date +%s > "$RC_STATE/$name.stopped"
+
+        [ -f "$RC_STATE/$name.hold" ] && { rm -f "$RC_STATE/$name.hold"; exit 0; }
+        # Straight back up after `rct restart`; back off if it keeps dying fast.
+        if [ -f "$RC_STATE/$name.restart" ]; then
+            rm -f "$RC_STATE/$name.restart"; backoff=10; sleep 1; continue
+        elif [ $(( $(date +%s) - started )) -lt 60 ]; then
+            backoff=$(( backoff < 300 ? backoff * 2 : 300 ))
+        else
+            backoff=2
+        fi
+        echo "rct: restarting in ${backoff}s (rct stop $name to stop for good)"
+        sleep "$backoff"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Daily update
+# ---------------------------------------------------------------------------
+
+# Weekly Homebrew upgrade, run from the daily job. Counts days since the last
+# successful run rather than a weekday, so a Mac asleep on that day catches up.
+brew_weekly() {
+    local stamp="$RC_STATE/brew-upgrade.last" last now
+    command -v brew >/dev/null || return 0
+    [ "$RC_BREW_UPGRADE_DAYS" -gt 0 ] 2>/dev/null || return 0
+    last="$(cat "$stamp" 2>/dev/null || echo 0)"; now="$(date +%s)"
+    if [ $((now - last)) -lt $((RC_BREW_UPGRADE_DAYS * 86400 - 3600)) ]; then
+        note "brew upgrade: last run $(( (now - last) / 86400 )) day(s) ago, next after $RC_BREW_UPGRADE_DAYS"
+        return 0
+    fi
+    note "brew update && brew upgrade"
+    brew update && brew upgrade && date +%s > "$stamp"
+    brew cleanup >/dev/null 2>&1 || true
+    note "pinned (skipped by upgrade): $(brew list --pinned | tr '\n' ' ')"
+}
+
+claude_version() { claude --version 2>/dev/null | awk '{print $1}'; }
+
+do_update() {
+    local before after real
+    note "=== daily update $(date '+%F %T') on $(host)"
+    before="$(claude_version)"
+    brew_weekly
+    real="$(command -v claude)" || die "claude not on PATH ($PATH)"
+    real="$(readlink -f "$real" 2>/dev/null || echo "$real")"
+    case "$real" in
+        */Caskroom/claude-code@latest/*) brew upgrade --cask claude-code@latest ;;
+        */Caskroom/claude-code/*)        brew upgrade --cask claude-code ;;
+        *)                               claude update ;;
+    esac
+    # Homebrew quarantines each new download, so the first run waits on a Gatekeeper
+    # desktop dialog. Clear the flag so the unattended update can finish.
+    real="$(readlink -f "$(command -v claude)" 2>/dev/null)" && xattr -d com.apple.quarantine "$real" 2>/dev/null || true
+    after="$(claude_version)"
+    note "claude $before -> $after"
+    case "$RC_RESTART_AFTER_UPDATE" in
+        never)   return 0 ;;
+        changed) [ "$before" = "$after" ] && { note "no new version, not restarting"; return 0; } ;;
+    esac
+    have_session || { note "no rct tmux session running, starting all"; for n in $(names); do start_one "$n"; done; return 0; }
+    local n
+    for n in $(names); do
+        if [ -f "$RC_STATE/$n.hold" ]; then continue; fi
+        restart_one "$n"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Chrome
+# ---------------------------------------------------------------------------
+
+chrome_cmd() {
+    local what="${1:-}"; shift || true
+    case "$what" in
+        on|off)
+            [ $# -gt 0 ] || die "usage: rct chrome $what <name...|all>"
+            for n in $(targets "$@"); do
+                entry "$n" >/dev/null || continue
+                echo "$what" > "$RC_STATE/$n.chrome"
+                note "$n: chrome $what"
+                have_window "$n" && restart_one "$n"
+            done ;;
+        reset)
+            for n in $(targets "$@"); do
+                rm -f "$RC_STATE/$n.chrome"; note "$n: chrome back to config"
+                have_window "$n" && restart_one "$n"
+            done ;;
+        up)    chrome_up ;;
+        ""|status)
+            printf '%-20s %s\n' NAME CHROME
+            entries | while IFS="$(printf '\t')" read -r n f o; do
+                printf '%-20s %s\n' "$n" "$(chrome_for "$n" "$o")"
+            done ;;
+        *) die "usage: rct chrome [status|on|off|reset|up] [name...|all]" ;;
+    esac
+}
+
+# Make sure a browser with the Claude extension is running so sessions can use it.
+# On a desktop this just opens Chrome in the background. On a box nobody sits at,
+# Chrome still needs a logged-in GUI session (macOS) or a display (Linux).
+chrome_up() {
+    local app="${RC_CHROME_APP:-Google Chrome}"
+    case "$(uname -s)" in
+        Darwin)
+            if pgrep -xq "$app"; then note "$app already running"
+            else open -g -a "$app" && note "opened $app in the background"; fi ;;
+        Linux)
+            local bin
+            bin="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+            [ -n "$bin" ] || die "no Chrome/Chromium found"
+            if pgrep -f "$bin" >/dev/null; then note "Chrome already running"; return 0; fi
+            if [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+                nohup "$bin" --no-first-run >/dev/null 2>&1 &
+            elif command -v xvfb-run >/dev/null; then
+                nohup xvfb-run -a "$bin" --no-first-run >/dev/null 2>&1 &
+            else
+                die "no display; install xvfb (xvfb-run) or log in to a desktop session"
+            fi
+            note "started Chrome" ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Status and attach
+# ---------------------------------------------------------------------------
+
+status() {
+    printf '%-20s %-8s %-7s %s\n' NAME STATE CHROME FOLDER
+    entries | while IFS="$(printf '\t')" read -r n f o; do
+        local st="stopped"
+        if have_window "$n"; then
+            if at_prompt "$n"; then st="prompt"
+            elif [ -n "$(claude_pid "$n")" ]; then st="running"; else st="waiting"; fi
+        fi
+        printf '%-20s %-8s %-7s %s\n' "$n" "$st" "$(chrome_for "$n" "$o")" "$f"
+    done
+    have_session || echo "(tmux session '$RC_TMUX' not running; rct up starts it)"
+    report_prompts
+}
+
+# Names every window stuck on a question, with the command that gets you there.
+report_prompts() {
+    local n
+    have_session || return 0
+    for n in $(names); do
+        have_window "$n" && at_prompt "$n" && note "$n is waiting on a prompt: run rct a $n"
+    done
+    return 0
+}
+
+attach() {
+    have_session || die "nothing running; rct up first"
+    if [ $# -gt 0 ]; then
+        have_window "$1" || die "no window '$1'"
+        tmux select-window -t "=$RC_TMUX:$1"
+    fi
+    if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$RC_TMUX"
+    else tmux attach -t "=$RC_TMUX"; fi
+}
+
+init() {
+    local here
+    here="$(cd "$(dirname "$SELF")/.." && pwd -P)"   # $0 may be the ~/.local/bin symlink
+    mkdir -p "$RC_HOME"
+    if [ -f "$RC_CONF" ]; then note "$RC_CONF already exists"
+    else cp "$here/sessions.conf.example" "$RC_CONF" && note "wrote $RC_CONF; edit it with: rct edit"; fi
+    [ -f "$RC_HOME/local.env" ] || cp "$here/local.env.example" "$RC_HOME/local.env"
+}
+
+usage() {
+    cat <<EOF
+rct: one claude remote-control server per folder, in tmux session '$RC_TMUX'
+
+  rct up [name...]            start all (or named) sessions
+  rct down [name...]          stop all (or named) sessions, sessions stay resumable ~4h
+  rct restart [name...]       restart sessions; with no names, also apply config edits
+  rct ls                      status of every configured session
+  rct a [name]                attach to tmux (jump to that window)
+  rct log <name>              tail a session's log
+  rct update                  update claude (and brew weekly), then restart
+  rct chrome                  show chrome on/off per session
+  rct chrome on|off <name...|all>   switch Chrome for sessions and restart them
+  rct chrome reset <name...|all>    go back to what the config file says
+  rct chrome up               make sure Chrome is running on this machine
+  rct edit                    open the config in \$EDITOR
+  rct init                    create config files from the examples
+
+config: $RC_CONF   host: $(host)
+EOF
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+    up|start)      new=""
+                   for n in $(targets "$@"); do have_window "$n" || new=1; start_one "$n"; done
+                   # give each new claude time to reach a prompt before looking for one
+                   [ -n "$new" ] && sleep 8; report_prompts ;;
+    down|stop)     for n in $(targets "$@"); do stop_one "$n"; done ;;
+    restart)       restart_cmd "$@" ;;
+    ls|status)     status ;;
+    a|attach)      attach "$@" ;;
+    log)           [ $# -eq 1 ] || die "usage: rct log <name>"; tail -n 50 -f "$RC_LOGS/$1.log" ;;
+    update)        do_update 2>&1 | tee -a "$RC_LOGS/update.log" ;;
+    chrome)        chrome_cmd "$@" ;;
+    edit)          "${EDITOR:-vi}" "$RC_CONF" ;;
+    init)          init ;;
+    _run)          run_loop "$1" ;;
+    help|-h|--help) usage ;;
+    *)             usage; exit 1 ;;
+esac
