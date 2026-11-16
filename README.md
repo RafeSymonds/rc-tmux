@@ -44,6 +44,7 @@ Uninstall: `install.sh --uninstall` (your config is left in place).
 | `rct up [name...]` | Start everything, or only the sessions named |
 | `rct down [name...]` | Stop with Ctrl-C. Sessions can be brought back for about 4 hours. |
 | `rct restart [name...]` | Stop and start again, for example after editing the config. A window still running an older `rct` is replaced, so script edits take effect. |
+| `rct new <name> [--repo [owner/]repo]` | Start a new project. See below. |
 | `rct log <name>` | Follow one session's log |
 | `rct update` | Run the daily job now |
 
@@ -54,6 +55,26 @@ before restarting backs off if it keeps failing.
 If you restart within about 4 hours, the folder's earlier sessions come back.
 This works because a plain `claude remote-control` in the same folder brings
 them back, so `rct` leaves `--name` off the command on those restarts.
+
+## New projects
+
+```sh
+rct new site --repo my-website chrome=on
+```
+
+This creates `~/Development/site` (`RC_PROJECTS_DIR` in `local.env` changes
+the parent), runs `git init` with a README commit, and creates the private
+GitHub repo `my-website` with `gh repo create`. It then adds `site
+~/Development/site chrome=on` to the config and starts the server. The repo
+name defaults to the session name. `--public` makes the repo public,
+`--no-repo` skips GitHub, `--dir` picks another folder, and `key=value` options
+go on the config line.
+
+`rct new` answers claude's `Trust <dir>? [y/N]` for you, but only for the
+folder it just created. It refuses to run if the folder, the config line, or
+the GitHub repo already exists. It leaves any other question, such as the
+first `Enable Remote Control?`, for you to answer with `rct a <name>`. It
+needs `gh auth login` and a git `user.email` on the machine.
 
 ## Coming from screen
 

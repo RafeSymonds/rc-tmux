@@ -433,6 +433,119 @@ init() {
     [ -f "$RC_HOME/local.env" ] || cp "$here/local.env.example" "$RC_HOME/local.env"
 }
 
+# ---------------------------------------------------------------------------
+# rct new: a new folder with its git and GitHub repo, a config line, and a
+# running server. The session name and the repo name can differ.
+# ---------------------------------------------------------------------------
+
+RC_PROJECTS_DIR="${RC_PROJECTS_DIR:-$HOME/Development}"
+
+new_usage() {
+    die "usage: rct new <name> [--repo [owner/]repo] [--dir folder] [--public] [--no-repo] [key=value ...]"
+}
+
+# Answers claude's `Trust <dir>? [y/N]`, but only when <dir> is the folder that
+# rct new just created. Any other question is left for a person with `rct a`.
+# Returns 0 once the server is running with no question on screen.
+answer_trust() {
+    local name="$1" real answered="" quiet=0 i last
+    real="$(cd "$2" && pwd -P)"   # claude shows the resolved path
+    for i in $(seq 1 60); do
+        sleep 1
+        have_window "$name" || { note "$name: window closed; see rct log $name"; return 1; }
+        if ! at_prompt "$name"; then
+            [ -n "$(claude_pid "$name")" ] && quiet=$((quiet + 1))
+            # done: a few quiet seconds after the answer, or no trust question at all
+            [ -n "$answered" ] && [ "$quiet" -ge 5 ] && return 0
+            [ "$quiet" -ge 15 ] && return 0
+            continue
+        fi
+        quiet=0
+        # -J joins lines tmux wrapped, so a long path is one line again
+        last="$(tmux capture-pane -J -p -t "=$RC_TMUX:$name" \
+            | awk 'NF { last = $0 } END { print last }' | sed 's/[[:space:]]*$//')"
+        if [ "$last" = "Trust $real? [y/N]" ] && [ -z "$answered" ]; then
+            sleep 1   # claude ignores an answer that arrives right after the question
+            tmux send-keys -t "=$RC_TMUX:$name" y Enter
+            note "$name: answered y to: $last"
+            answered=1
+            continue
+        fi
+        # claude echoes the y and takes a few seconds to move on
+        [ -n "$answered" ] && [ "$last" = "Trust $real? [y/N] y" ] && continue
+        note "$name is waiting on a question rct new does not answer: $last"
+        note "answer it with: rct a $name"
+        return 1
+    done
+    note "$name: no running server after 60s; check rct a $name"
+    return 1
+}
+
+new_project() {
+    local name="" repo="" dir="" vis="--private" want_repo=1 opts="" shown
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo)    [ $# -ge 2 ] || new_usage; repo="$2"; shift ;;
+            --dir)     [ $# -ge 2 ] || new_usage; dir="$2"; shift ;;
+            --public)  vis="--public" ;;
+            --no-repo) want_repo="" ;;
+            *=*)       opts="$opts $1" ;;
+            -*)        new_usage ;;
+            *)         [ -z "$name" ] || new_usage; name="$1" ;;
+        esac
+        shift
+    done
+    [ -n "$name" ] || new_usage
+    case "$name" in -*|*[!A-Za-z0-9._-]*) die "name may only use letters, digits, '.', '_' and '-'" ;; esac
+    [ -n "$repo" ] || repo="$name"
+    case "$repo" in */*/*|/*|*/|*[!A-Za-z0-9._/-]*) die "bad repo name: $repo" ;; esac
+    [ -n "$dir" ] || dir="$RC_PROJECTS_DIR/$name"
+    case "$dir" in "~"/*) dir="$HOME/${dir#\~/}" ;; /*) ;; *) die "--dir must be absolute or start with ~/" ;; esac
+
+    # Check everything before creating anything.
+    [ -f "$RC_CONF" ] || die "no config at $RC_CONF (run: rct init)"
+    awk -v n="$name" '{ sub(/#.*/, "") } $1 == n { f = 1 } END { exit !f }' "$RC_CONF" \
+        && die "'$name' is already in $RC_CONF"
+    have_window "$name" && die "a tmux window named '$name' already exists"
+    # Only a folder made here gets its trust question answered, so never reuse one.
+    [ -e "$dir" ] && die "$dir already exists"
+    [ -n "$(git config user.email)" ] || die "git has no user.email; set it with git config --global user.email"
+    if [ -n "$want_repo" ]; then
+        command -v gh >/dev/null || die "gh not found (install it, or pass --no-repo)"
+        gh auth status >/dev/null 2>&1 || die "gh is not logged in; run gh auth login on $(host)"
+        gh repo view "$repo" >/dev/null 2>&1 && die "GitHub repo $repo already exists"
+    fi
+
+    mkdir -p "$(dirname "$dir")" && mkdir "$dir" || die "could not create $dir"
+    if ! ( cd "$dir" && git init -q -b main && printf '# %s\n' "${repo##*/}" > README.md \
+            && git add README.md && git commit -qm "Initial commit" ); then
+        rm -rf "$dir"; die "git setup failed; removed $dir"
+    fi
+    note "created $dir"
+    if [ -n "$want_repo" ]; then
+        if ! ( cd "$dir" && gh repo create "$repo" "$vis" --source . --remote origin --push ); then
+            rm -rf "$dir"
+            die "gh repo create failed; removed $dir. If GitHub shows $repo, it was made before the push failed."
+        fi
+    fi
+
+    shown="$dir"
+    # shellcheck disable=SC2088  # a literal ~ for the config file, which rct expands
+    case "$dir" in "$HOME"/*) shown="~/${dir#"$HOME"/}" ;; esac
+    # add a newline first if the file doesn't end with one
+    [ -s "$RC_CONF" ] && [ -n "$(tail -c 1 "$RC_CONF")" ] && echo >> "$RC_CONF"
+    printf '%-12s %s%s\n' "$name" "$shown" "$opts" >> "$RC_CONF"
+    note "added to $RC_CONF: $name $shown$opts"
+    # A `default host=...` line above the new one can keep it off this machine.
+    entry "$name" >/dev/null 2>&1 \
+        || die "$name is in the config but not for host $(host); check the default lines above it"
+
+    start_one "$name"
+    answer_trust "$name" "$dir"; local rc=$?
+    status | awk -v n="$name" 'NR == 1 || $1 == n'
+    return $rc
+}
+
 usage() {
     cat <<EOF
 rct: one claude remote-control server per folder, in tmux session '$RC_TMUX'
@@ -448,6 +561,8 @@ rct: one claude remote-control server per folder, in tmux session '$RC_TMUX'
   rct chrome on|off <name...|all>   switch Chrome for sessions and restart them
   rct chrome reset <name...|all>    go back to what the config file says
   rct chrome up               make sure Chrome is running on this machine
+  rct new <name> [--repo [owner/]repo] [--dir folder] [--public] [--no-repo] [key=value ...]
+                              new folder + git + GitHub repo, add it to the config, start it
   rct edit                    open the config in \$EDITOR
   rct init                    create config files from the examples
 
@@ -468,6 +583,7 @@ case "$cmd" in
     log)           [ $# -eq 1 ] || die "usage: rct log <name>"; tail -n 50 -f "$RC_LOGS/$1.log" ;;
     update)        do_update 2>&1 | tee -a "$RC_LOGS/update.log" ;;
     chrome)        chrome_cmd "$@" ;;
+    new)           new_project "$@" ;;
     edit)          "${EDITOR:-vi}" "$RC_CONF" ;;
     init)          init ;;
     _run)          run_loop "$1" ;;
