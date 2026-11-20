@@ -26,7 +26,10 @@ rct a           # attach; answer the one-time prompts in each window
 **The first start needs you at the keyboard.** In a folder Claude Code doesn't
 trust yet, `claude remote-control` asks `Trust <dir>? [y/N]`. On the very first
 run it also asks `Enable Remote Control? (y/n)`. Run `rct a` and answer y in
-each window. After that, starts are unattended.
+each window. After that, starts are unattended. The home folder is the
+exception: Claude Code never saves trust for `~` itself, so a `name ~` line
+needs `trust=yes`, which answers that question for the line's own folder on
+every start.
 
 `rct up` and `rct ls` name any window that is stuck on a question like these
 (`rct ls` shows its state as `prompt`). In a git folder claude would also ask
@@ -144,16 +147,3 @@ underneath the running tmux server. Set the value to 0 to turn the upgrade off.
 - `sessions.conf.example`: copied to `~/.config/rc-tmux/sessions.conf`. It can be shared between machines; `host=` limits a line to some machines.
 - `local.env.example`: copied to `~/.config/rc-tmux/local.env`, which holds settings for one machine
 - `~/.config/rc-tmux/logs/`: one log per session, plus `update.log` and the launchd output
-
-## move-dev (one-off helper)
-
-`bin/move-dev <old-path> [extra-link ...]` moves a projects folder to
-`~/Development` and leaves a symlink at the old path, so the agent using it
-keeps working. Any extra paths also become links to `~/Development`, which is
-how other agents get access. Start with a dry run: `DRY=1 bin/move-dev ...`.
-
-The script refuses to overwrite anything. It lists the processes that still
-have the folder open, and it stops if a running Docker container mounts the
-folder: a symlink can't point out of a bind mount, so those containers need a
-bind mount of `~/Development` instead. When it finishes, it prints the
-command that undoes the move.

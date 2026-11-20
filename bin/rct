@@ -39,6 +39,7 @@ host() { hostname -s 2>/dev/null || hostname; }
 #   model=<model>        model for the sessions (opus, sonnet, or a full model id)
 #   effort=<level>       pin the effort level (low..max); see effortLevel in settings for a soft default
 #   host=<glob>          only start on machines whose short hostname matches
+#   trust=yes            answer claude's trust question for this folder on each start
 # Lines starting with `default` add key=value defaults for the lines below them;
 # `default clear` drops them all.
 # ---------------------------------------------------------------------------
@@ -122,6 +123,31 @@ claude_pid() {
 # `Choose [1/2]` or `Trust <dir>? [y/N]`. Nothing answers those but `rct a`.
 at_prompt() {
     tmux capture-pane -p -t "=$RC_TMUX:$1" 2>/dev/null | awk 'NF { last = $0 } END { exit !(last ~ /\[[^]]*\/[^]]*\]|\(y\/n\)/) }'
+}
+
+# The window's last non-empty line, with lines tmux wrapped joined back (-J) and
+# trailing spaces dropped.
+last_line() {
+    tmux capture-pane -J -p -t "=$RC_TMUX:$1" 2>/dev/null \
+        | awk 'NF { last = $0 } END { print last }' | sed 's/[[:space:]]*$//'
+}
+
+# For a line with trust=yes: answers claude's `Trust <folder>? [y/N]` for that
+# line's own folder, once, in the first minute after a start. Claude never saves
+# trust for the home folder, so `name ~` needs this to start unattended. Any
+# other question is left for `rct a`.
+auto_trust() {
+    local name="$1" real i
+    real="$(cd "$2" && pwd -P)"
+    for i in $(seq 1 60); do
+        sleep 1
+        at_prompt "$name" || continue
+        [ "$(last_line "$name")" = "Trust $real? [y/N]" ] || return 0
+        sleep 1   # claude ignores an answer that arrives right after the question
+        tmux send-keys -t "=$RC_TMUX:$name" y Enter
+        echo "[$(date '+%F %T')] $name: trust=yes answered y for $real" >> "$RC_LOGS/$name.log"
+        return 0
+    done
 }
 
 # Absolute path to this script, so tmux windows never pick up some other `rct` on PATH.
@@ -261,6 +287,7 @@ run_loop() {
         printf '\n[%s] %s: claude %s\n  in %s%s\n\n' "$(date '+%F %T')" "$name" "$*" "$folder" "${ANTHROPIC_MODEL:+  model $ANTHROPIC_MODEL}${CLAUDE_CODE_EFFORT_LEVEL:+  effort $CLAUDE_CODE_EFFORT_LEVEL}" \
             | tee -a "$RC_LOGS/$name.log"
         started="$(date +%s)"
+        [ "$(opt trust "$opts")" = yes ] && auto_trust "$name" "$folder" &
         claude "$@"
         echo "[$(date '+%F %T')] $name: claude exited ($?)" | tee -a "$RC_LOGS/$name.log"
         date +%s > "$RC_STATE/$name.stopped"
@@ -475,9 +502,7 @@ answer_trust() {
             continue
         fi
         quiet=0
-        # -J joins lines tmux wrapped, so a long path is one line again
-        last="$(tmux capture-pane -J -p -t "=$RC_TMUX:$name" \
-            | awk 'NF { last = $0 } END { print last }' | sed 's/[[:space:]]*$//')"
+        last="$(last_line "$name")"
         if [ "$last" = "Trust $real? [y/N]" ] && [ -z "$answered" ]; then
             sleep 1   # claude ignores an answer that arrives right after the question
             tmux send-keys -t "=$RC_TMUX:$name" y Enter
