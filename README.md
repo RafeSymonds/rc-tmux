@@ -76,6 +76,23 @@ the GitHub repo already exists. It leaves any other question, such as the
 first `Enable Remote Control?`, for you to answer with `rct a <name>`. It
 needs `gh auth login` and a git `user.email` on the machine.
 
+### From the Claude desktop app
+
+`mcp/` is a desktop extension that runs `rct new` over SSH from a form in a
+Claude conversation (Chat, Cowork, and chats in a Project). Build and install it:
+
+```sh
+cd mcp && npm install && npm run pack   # makes mcp/rc-tmux.mcpb
+open rc-tmux.mcpb                       # installs it in the desktop app
+```
+
+Set **Machines** in the extension's settings (default `mini`). Then ask Claude
+for a new project, or name the details ("new rc project recipes, repo
+recipe-box"). The form shows progress and ends with Open session and Open repo
+buttons. Each host needs key-based SSH from the Mac and an `rct` with `rct new`.
+`rct url <name>` prints a session's claude.ai link. `npm test` runs the
+extension's tests against a stub `rct`.
+
 ## Coming from screen
 
 `~/.tmux.conf` uses Ctrl-a, so most of your screen keys still work:

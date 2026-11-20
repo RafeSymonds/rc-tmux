@@ -1,0 +1,34 @@
+{
+  "manifest_version": "0.2",
+  "name": "rc-tmux",
+  "display_name": "rc-tmux",
+  "version": "0.1.0",
+  "description": "Start new rc-tmux projects on your machines: folder, git and GitHub repo, and a running Remote Control server, from a form in the conversation.",
+  "author": { "name": "Rafe" },
+  "repository": { "type": "git", "url": "https://github.com/RafeSymonds/rc-tmux" },
+  "server": {
+    "type": "node",
+    "entry_point": "server.mjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server.mjs"],
+      "env": { "RC_HOSTS": "${user_config.hosts}" }
+    }
+  },
+  "tools": [
+    { "name": "new_project_form", "description": "Show the new-project form" },
+    { "name": "create_project", "description": "Create a project with rct new over SSH" },
+    { "name": "project_status", "description": "Check on a project being created" }
+  ],
+  "user_config": {
+    "hosts": {
+      "type": "string",
+      "title": "Machines",
+      "description": "SSH hosts that run rc-tmux, separated by commas. The first is the default. Each needs key-based SSH from this Mac.",
+      "default": "mini",
+      "required": false
+    }
+  },
+  "compatibility": { "platforms": ["darwin", "linux"], "runtimes": { "node": ">=18.0.0" } },
+  "license": "MIT"
+}

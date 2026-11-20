@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Fake ssh for tests: runs the remote command here with the stub as rct, and,
+# like Tailscale SSH, always exits 0.
+cmd="${@: -1}"
+cmd="${cmd//\~\/.local\/bin\/rct/$STUB_RCT}"
+bash -c "$cmd"
+exit 0

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>New rc-tmux project</title>
+<style>
+  :root {
+    --bg: var(--color-background-primary, #fff);
+    --bg-2: var(--color-background-secondary, #f5f4ef);
+    --text: var(--color-text-primary, #1f1e1d);
+    --muted: var(--color-text-secondary, #6b6a66);
+    --border: var(--color-border-primary, rgba(0,0,0,.14));
+    --danger: var(--color-text-danger, #b42318);
+    --success: var(--color-text-success, #2f7d32);
+    --ring: var(--color-ring-primary, #2c84db);
+    --radius: var(--border-radius-md, 8px);
+    --inverse-bg: var(--color-background-inverse, #1f1e1d);
+    --inverse-text: var(--color-text-inverse, #fff);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: var(--color-background-primary, #262624); --bg-2: var(--color-background-secondary, #30302e);
+      --text: var(--color-text-primary, #f5f4ef); --muted: var(--color-text-secondary, #a6a39a);
+      --border: var(--color-border-primary, rgba(255,255,255,.16));
+      --inverse-bg: var(--color-background-inverse, #f5f4ef); --inverse-text: var(--color-text-inverse, #1f1e1d);
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; font: 14px/1.5 var(--font-sans, system-ui, sans-serif); color: var(--text); background: transparent; }
+  h1 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  input, select { width: 100%; height: 34px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg); color: var(--text); font: inherit; }
+  input:focus, select:focus, button:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
+  .seg { display: flex; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .seg label { flex: 1; margin: 0; text-align: center; padding: 7px 4px; cursor: pointer; color: var(--text); font-size: 13px; }
+  .seg label + label { border-left: 1px solid var(--border); }
+  .seg input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .seg label:has(input:checked) { background: var(--bg-2); font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+  button { height: 34px; padding: 0 14px; border-radius: var(--radius); border: 1px solid var(--border);
+    background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--inverse-bg); color: var(--inverse-text); border-color: transparent; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .err { color: var(--danger); font-size: 13px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .status { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; border: 2px solid var(--muted); border-top-color: transparent; animation: spin 1s linear infinite; }
+  .ok { color: var(--success); } .bad { color: var(--danger); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  pre { background: var(--bg-2); border-radius: var(--radius); padding: 10px; margin: 8px 0 0; max-height: 220px; overflow: auto;
+    font: 12px/1.45 var(--font-mono, ui-monospace, monospace); white-space: pre-wrap; word-break: break-all; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-top: 12px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<section id="form-view">
+  <h1>New project</h1>
+  <p class="sub">Creates the folder, a git repo and a GitHub repo, then starts a Remote Control server for it.</p>
+  <form id="form" novalidate>
+    <div class="grid">
+      <div><label for="name">Name</label><input id="name" autocomplete="off" spellcheck="false" placeholder="recipes"></div>
+      <div><label for="repo">GitHub repo</label><input id="repo" autocomplete="off" spellcheck="false" placeholder="same as name"></div>
+      <div><label for="host">Machine</label><select id="host"></select></div>
+      <div><label for="spawn">Sessions</label>
+        <select id="spawn"><option value="same-dir">Share this folder</option><option value="worktree">Own worktree each</option></select></div>
+    </div>
+    <div style="margin-top:12px"><label>Repository</label>
+      <div class="seg" role="radiogroup">
+        <label><input type="radio" name="vis" value="private" checked>Private</label>
+        <label><input type="radio" name="vis" value="public">Public</label>
+        <label><input type="radio" name="vis" value="none">No GitHub repo</label>
+      </div>
+    </div>
+    <div class="hint" id="where"></div>
+    <div class="row"><button class="primary" id="create" type="submit">Create project</button><span class="err" id="form-err"></span></div>
+  </form>
+</section>
+
+<section id="job-view" hidden>
+  <div class="status" id="status"><span class="dot"></span><span id="status-text"></span></div>
+  <p class="sub" id="status-sub" style="margin:4px 0 0"></p>
+  <div class="row" id="links" hidden>
+    <button class="primary" id="open-session">Open session</button>
+    <button id="open-repo">Open repo</button>
+  </div>
+  <div class="row" id="retry-row" hidden><button id="retry">Back to the form</button></div>
+  <details id="log-box"><summary>Output</summary><pre id="log"></pre></details>
+</section>
+
+<script type="module">/*__APP_CLIENT__*/</script>
+<script type="module">
+  const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = window.McpApps;
+  const $ = id => document.getElementById(id);
+  const NAME = /^[A-Za-z0-9._][A-Za-z0-9._-]*$/;
+  const REPO = /^([A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/;
+  const app = new App({ name: 'rc-tmux new project', version: '0.1.0' });
+  let job = null, poll = null, last = {};
+
+  const theme = ctx => {
+    if (!ctx) return;
+    if (ctx.theme) applyDocumentTheme(ctx.theme);
+    if (ctx.styles?.variables) applyHostStyleVariables(ctx.styles.variables);
+    if (ctx.styles?.css?.fonts) applyHostFonts(ctx.styles.css.fonts);
+  };
+
+  function showForm(hosts, d = {}) {
+    clearInterval(poll); job = null;
+    $('job-view').hidden = true; $('form-view').hidden = false;
+    const sel = $('host');
+    if (hosts?.length) sel.replaceChildren(...hosts.map(h => new Option(h, h)));
+    if (d.host) sel.value = d.host;
+    if (d.name) $('name').value = d.name;
+    if (d.repo) $('repo').value = d.repo;
+    if (d.visibility) document.querySelector(`input[name=vis][value=${d.visibility}]`).checked = true;
+    if (d.spawn) $('spawn').value = d.spawn;
+    $('create').disabled = false;
+    sync();
+  }
+
+  function sync() {
+    const name = $('name').value.trim(), none = visibility() === 'none';
+    $('repo').disabled = none;
+    $('repo').placeholder = name || 'same as name';
+    $('where').textContent = name ? `Folder ~/Development/${name} on ${$('host').value || 'the host'}` : '';
+  }
+  const visibility = () => document.querySelector('input[name=vis]:checked').value;
+
+  function showJob(j) {
+    job = j;
+    $('form-view').hidden = true; $('job-view').hidden = false;
+    const running = j.status === 'running', done = j.status === 'done';
+    $('status').querySelector('.dot').hidden = !running;
+    $('status-text').className = done ? 'ok' : running ? '' : 'bad';
+    $('status-text').textContent = running ? `Creating ${j.name} on ${j.host}…`
+      : done ? `${j.name} is running on ${j.host}` : `Couldn't create ${j.name}`;
+    $('status-sub').textContent = running ? 'This usually takes under a minute.'
+      : done ? (j.sessionUrl ? 'Open the session to start working in it.' : 'The server is running. Find it in claude.ai/code.')
+      : j.error ?? '';
+    $('log').textContent = j.log || '(no output yet)';
+    $('log-box').open = j.status === 'failed';
+    $('links').hidden = !done;
+    $('open-session').hidden = !j.sessionUrl;
+    $('open-repo').hidden = !j.repoUrl;
+    $('retry-row').hidden = j.status !== 'failed';
+    if (!running) clearInterval(poll);
+  }
+
+  function follow(j) {
+    showJob(j);
+    clearInterval(poll);
+    if (j.status !== 'running') return;
+    poll = setInterval(async () => {
+      try {
+        const r = await app.callServerTool({ name: 'project_status', arguments: { jobId: j.jobId } });
+        if (r.structuredContent) showJob(r.structuredContent);
+      } catch { /* the next tick tries again */ }
+    }, 2000);
+  }
+
+  function onResult(r) {
+    const sc = r?.structuredContent;
+    if (r?.isError) { showForm(last.hosts, last.defaults); $('form-err').textContent = r.content?.[0]?.text ?? 'Something went wrong.'; return; }
+    if (sc?.view === 'job' || sc?.jobId) return follow(sc);
+    last = { hosts: sc?.hosts, defaults: sc?.defaults };
+    showForm(sc?.hosts, sc?.defaults);
+  }
+
+  $('form').addEventListener('input', () => { $('form-err').textContent = ''; sync(); });
+  $('form').addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const name = $('name').value.trim(), repo = $('repo').value.trim(), vis = visibility();
+    if (!NAME.test(name)) { $('form-err').textContent = 'Enter a name: letters, digits, ".", "_" or "-".'; $('name').focus(); return; }
+    if (vis !== 'none' && repo && !REPO.test(repo)) { $('form-err').textContent = 'Repo is "name" or "owner/name".'; $('repo').focus(); return; }
+    $('create').disabled = true;
+    const args = { host: $('host').value, name, visibility: vis, spawn: $('spawn').value };
+    if (vis !== 'none' && repo) args.repo = repo;
+    try {
+      onResult(await app.callServerTool({ name: 'create_project', arguments: args }));
+    } catch (err) {
+      $('create').disabled = false; $('form-err').textContent = `Couldn't start: ${err.message ?? err}`;
+    }
+  });
+  $('retry').onclick = () => showForm(last.hosts, { host: job?.host, name: job?.name });
+  $('open-session').onclick = () => job?.sessionUrl && app.openLink({ url: job.sessionUrl });
+  $('open-repo').onclick = () => job?.repoUrl && app.openLink({ url: job.repoUrl });
+
+  app.ontoolinput = ({ arguments: a }) => { if (a && !job) showForm(null, a); };
+  app.ontoolresult = onResult;
+  app.onhostcontextchanged = theme;
+  showForm(['mini']);
+  try {
+    await app.connect();
+    theme(app.getHostContext());
+  } catch (err) {
+    $('form-err').textContent = `Can't reach Claude: ${err.message ?? err}`;
+  }
+</script>
+</body>
+</html>

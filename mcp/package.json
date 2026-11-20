@@ -1,0 +1,17 @@
+{
+  "name": "rc-tmux-mcp",
+  "version": "0.1.0",
+  "description": "Start rc-tmux projects from the Claude desktop app",
+  "type": "module",
+  "private": true,
+  "main": "server.mjs",
+  "scripts": {
+    "test": "node test/test.mjs",
+    "pack": "npx -y @anthropic-ai/mcpb@2.1.2 pack . rc-tmux.mcpb"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "4.6.7"
+  }
+}

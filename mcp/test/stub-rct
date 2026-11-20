@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Stands in for `rct new` in tests: prints what the real one prints.
+[ "$1" = new ] || { echo "rct: stub only knows new" >&2; exit 2; }
+name="$2"; shift 2
+echo "rct: created /Users/me/Development/$name"
+case "$name" in
+  fail*) echo "rct: GitHub repo $name already exists" >&2; exit 1 ;;
+esac
+sleep 1
+repo="$name"; while [ $# -gt 0 ]; do [ "$1" = --repo ] && repo="$2"; shift; done
+echo "https://github.com/someone/${repo##*/}"
+echo "rct: added to /Users/me/.config/rc-tmux/sessions.conf: $name ~/Development/$name"
+echo "rct: started $name"
+echo "rct: $name: answered y to: Trust /Users/me/Development/$name? [y/N]"
+echo "rct: open: https://claude.ai/code?environment=env_01TEST$name"
