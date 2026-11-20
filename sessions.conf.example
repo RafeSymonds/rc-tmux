@@ -26,13 +26,13 @@
 default chrome=on model=opus
 
 # --- Personal -------------------------------------------------------------
-dev          ~/Development
-blog         ~/Development/blog
+other        ~/other
+blog         ~/other/blog
 
-# --- Work (kept separate from personal) -----------------------------------
-work         ~/Development/work
-work-api     ~/Development/work/api
+# --- Classes (kept separate from personal) --------------------------------
+class        ~/classes/eecs-101
+class-lab    ~/classes/eecs-101/lab
 
 # --- Headless box: no one watching, so no Chrome unless asked -------------
 # default chrome=off host=mini*
-# mini-dev     ~/Development
+# mini-other   ~/other

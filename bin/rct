@@ -438,7 +438,7 @@ init() {
 # running server. The session name and the repo name can differ.
 # ---------------------------------------------------------------------------
 
-RC_PROJECTS_DIR="${RC_PROJECTS_DIR:-$HOME/Development}"
+RC_PROJECTS_DIR="${RC_PROJECTS_DIR:-$HOME}"
 
 # The claude.ai link to a session's Remote Control environment. claude records the
 # environment in a pointer file under its projects folder, named after the

@@ -126,7 +126,7 @@ function jobText(job) {
 // --- Server ---
 
 function buildServer() {
-  const server = new McpServer({ name: 'rc-tmux', version: '0.1.0' });
+  const server = new McpServer({ name: 'rc-tmux', version: '0.1.1' });
   const formResult = defaults => ({
     content: [{ type: 'text', text: `Showing the new-project form. Hosts: ${HOSTS.join(', ')}.` }],
     structuredContent: { view: 'form', hosts: HOSTS, defaults },

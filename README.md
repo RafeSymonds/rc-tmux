@@ -62,10 +62,10 @@ them back, so `rct` leaves `--name` off the command on those restarts.
 rct new site --repo my-website chrome=on
 ```
 
-This creates `~/Development/site` (`RC_PROJECTS_DIR` in `local.env` changes
+This creates `~/site` (`RC_PROJECTS_DIR` in `local.env` changes
 the parent), runs `git init` with a README commit, and creates the private
 GitHub repo `my-website` with `gh repo create`. It then adds `site
-~/Development/site chrome=on` to the config and starts the server. The repo
+~/site chrome=on` to the config and starts the server. The repo
 name defaults to the session name. `--public` makes the repo public,
 `--no-repo` skips GitHub, `--dir` picks another folder, and `key=value` options
 go on the config line.

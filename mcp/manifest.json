@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "rc-tmux",
   "display_name": "rc-tmux",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Start new rc-tmux projects on your machines: folder, git and GitHub repo, and a running Remote Control server, from a form in the conversation.",
   "author": { "name": "Rafe" },
   "repository": { "type": "git", "url": "https://github.com/RafeSymonds/rc-tmux" },

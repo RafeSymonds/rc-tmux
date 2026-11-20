@@ -126,7 +126,7 @@
     const name = $('name').value.trim(), none = visibility() === 'none';
     $('repo').disabled = none;
     $('repo').placeholder = name || 'same as name';
-    $('where').textContent = name ? `Folder ~/Development/${name} on ${$('host').value || 'the host'}` : '';
+    $('where').textContent = name ? `Folder ~/${name} on ${$('host').value || 'the host'}` : '';
   }
   const visibility = () => document.querySelector('input[name=vis]:checked').value;
 

@@ -1,6 +1,6 @@
 {
   "name": "rc-tmux-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Start rc-tmux projects from the Claude desktop app",
   "type": "module",
   "private": true,
