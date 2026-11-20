@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>rc-tmux status</title>
+<style>
+/*__BASE_CSS__*/
+.top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.top h1 { margin: 0; }
+.top .sub { margin: 0; flex: 1; min-width: 120px; }
+button.sm { height: 28px; padding: 0 10px; font-size: 13px; }
+.host { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 12px; overflow: hidden; }
+.host-head { display: flex; gap: 8px; align-items: baseline; padding: 10px 12px; background: var(--bg-2); }
+.host-head b { font-size: 14px; }
+.host-head span { color: var(--muted); font-size: 12px; }
+.sess { padding: 10px 12px; border-top: 1px solid var(--border); }
+.sess:first-of-type { border-top: 0; }
+.line { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.who { flex: 1; min-width: 160px; }
+.who b { font-weight: 600; }
+.who .folder { color: var(--muted); font-size: 12px; font-family: var(--font-mono, ui-monospace, monospace); }
+.state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; min-width: 76px; }
+.state i { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.state.running i { background: var(--success); } .state.running { color: var(--success); }
+.state.prompt i, .state.waiting i { background: var(--warning); } .state.prompt, .state.waiting { color: var(--warning); }
+.state.stopped { color: var(--muted); }
+.acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.q { margin-top: 6px; font-size: 12px; color: var(--warning); }
+.q code { font-family: var(--font-mono, ui-monospace, monospace); }
+.msg { margin-top: 6px; font-size: 12px; }
+.empty { padding: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="top">
+  <h1>rc-tmux</h1>
+  <p class="sub" id="when">Loading…</p>
+  <button class="sm" id="refresh">Refresh</button>
+  <button class="sm primary" id="new">New project</button>
+</div>
+<div id="hosts"></div>
+<p class="err" id="err"></p>
+
+<script type="module">/*__APP_CLIENT__*/</script>
+<script type="module">
+  const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = window.McpApps;
+  const $ = id => document.getElementById(id);
+  const app = new App({ name: 'rc-tmux status', version: '0.2.0' });
+  const busy = new Map();      // "host/name" -> action label while an action runs
+  const notes = new Map();     // "host/name" -> { text, bad } after an action
+  const screens = new Map();   // "host/name" -> screen text while open
+  let data = null, onlyHost = undefined, loading = false;
+
+  const theme = ctx => {
+    if (!ctx) return;
+    if (ctx.theme) applyDocumentTheme(ctx.theme);
+    if (ctx.styles?.variables) applyHostStyleVariables(ctx.styles.variables);
+    if (ctx.styles?.css?.fonts) applyHostFonts(ctx.styles.css.fonts);
+  };
+  const el = (tag, props = {}, ...kids) => {
+    const n = Object.assign(document.createElement(tag), props);
+    n.append(...kids.filter(k => k !== null && k !== undefined && k !== false));
+    return n;
+  };
+  const home = path => path.replace(/^\/(Users|home)\/[^/]+/, '~');
+  const label = { running: 'running', prompt: 'question', waiting: 'restarting', stopped: 'stopped' };
+
+  function render() {
+    if (!data) return;
+    $('when').textContent = `Updated ${new Date(data.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`;
+    $('hosts').replaceChildren(...data.hosts.map(h => {
+      const head = el('div', { className: 'host-head' }, el('b', { textContent: h.host }),
+        h.ok && el('span', { textContent: `${h.sessions.length} sessions${h.tmux ? '' : ' · tmux not running'}` }));
+      if (!h.ok) return el('div', { className: 'host' }, head, el('div', { className: 'empty err', textContent: h.error }));
+      if (!h.sessions.length) return el('div', { className: 'host' }, head, el('div', { className: 'empty', textContent: 'No sessions in its config.' }));
+      return el('div', { className: 'host' }, head, ...h.sessions.map(s => row(h.host, s)));
+    }));
+  }
+
+  function row(host, s) {
+    const key = `${host}/${s.name}`, doing = busy.get(key), note = notes.get(key), screen = screens.get(key);
+    const btn = (text, onclick, extra = {}) => el('button', { className: 'sm', textContent: text, onclick, disabled: !!doing, ...extra });
+    const acts = el('div', { className: 'acts' },
+      s.url && btn('Open', () => app.openLink({ url: s.url })),
+      s.state === 'stopped' ? btn(doing === 'start' ? 'Starting…' : 'Start', () => act(host, s.name, 'start'))
+        : btn(doing === 'restart' ? 'Restarting…' : 'Restart', () => act(host, s.name, 'restart')),
+      s.state !== 'stopped' && btn(doing === 'stop' ? 'Stopping…' : 'Stop', () => act(host, s.name, 'stop')),
+      btn(screen ? 'Hide screen' : 'Screen', () => toggleScreen(host, s.name)),
+    );
+    return el('div', { className: 'sess' },
+      el('div', { className: 'line' },
+        el('span', { className: `state ${s.state}` }, el('i'), label[s.state] ?? s.state),
+        el('div', { className: 'who' }, el('b', { textContent: s.name }), el('div', { className: 'folder', textContent: home(s.folder) })),
+        acts),
+      s.question && el('div', { className: 'q' }, 'Waiting on ', el('code', { textContent: s.question }),
+        '. Answer it in a terminal: ', el('code', { textContent: host === 'local' ? `rct a ${s.name}` : `ssh -t ${host} rct a ${s.name}` })),
+      note && el('div', { className: `msg ${note.bad ? 'err' : 'ok'}`, textContent: note.text }),
+      screen && el('pre', { textContent: screen }));
+  }
+
+  async function load() {
+    if (loading) return;
+    loading = true;
+    try {
+      const r = await app.callServerTool({ name: 'rc_status', arguments: onlyHost ? { host: onlyHost } : {} });
+      if (r.isError) $('err').textContent = r.content?.[0]?.text ?? 'Could not load status.';
+      else { $('err').textContent = ''; data = r.structuredContent; render(); }
+    } catch (e) {
+      $('err').textContent = `Could not load status: ${e.message ?? e}`;
+    } finally { loading = false; }
+  }
+
+  async function act(host, name, verb) {
+    const key = `${host}/${name}`;
+    busy.set(key, verb); notes.delete(key); render();
+    try {
+      const r = await app.callServerTool({ name: `rc_${verb}`, arguments: { host, name } });
+      notes.set(key, r.isError ? { bad: true, text: r.content?.[0]?.text ?? `${verb} failed` }
+        : { text: { start: 'Started.', stop: 'Stopped.', restart: 'Restarted.' }[verb] });
+    } catch (e) {
+      notes.set(key, { bad: true, text: `${verb} failed: ${e.message ?? e}` });
+    }
+    busy.delete(key);
+    if (screens.has(key)) await fetchScreen(host, name);
+    await load();
+  }
+
+  async function fetchScreen(host, name) {
+    const r = await app.callServerTool({ name: 'rc_log', arguments: { host, name, lines: 30 } });
+    const sc = r.structuredContent;
+    screens.set(`${host}/${name}`, r.isError ? (r.content?.[0]?.text ?? 'No screen.') : `${sc.screen}\n\n── rct log ──\n${sc.log}`);
+  }
+
+  async function toggleScreen(host, name) {
+    const key = `${host}/${name}`;
+    if (screens.has(key)) { screens.delete(key); render(); return; }
+    screens.set(key, 'Loading…'); render();
+    try { await fetchScreen(host, name); } catch (e) { screens.set(key, `Could not load: ${e.message ?? e}`); }
+    render();
+  }
+
+  $('refresh').onclick = load;
+  $('new').onclick = () => app.sendMessage({ role: 'user', content: [{ type: 'text', text: 'Start a new rc project.' }] });
+  app.ontoolinput = ({ arguments: a }) => { onlyHost = a?.host; };
+  app.ontoolresult = r => {
+    if (r?.isError) { $('err').textContent = r.content?.[0]?.text ?? 'Could not load status.'; return; }
+    if (r?.structuredContent?.view === 'status') { data = r.structuredContent; render(); }
+  };
+  app.onhostcontextchanged = theme;
+  // Refresh every 20 seconds while the dashboard is on screen.
+  setInterval(() => { if (document.visibilityState === 'visible' && busy.size === 0) load(); }, 20000);
+  try {
+    await app.connect();
+    theme(app.getHostContext());
+  } catch (err) {
+    $('err').textContent = `Can't reach Claude: ${err.message ?? err}`;
+  }
+</script>
+</body>
+</html>

@@ -2,23 +2,61 @@
   "manifest_version": "0.2",
   "name": "rc-tmux",
   "display_name": "rc-tmux",
-  "version": "0.1.1",
-  "description": "Start new rc-tmux projects on your machines: folder, git and GitHub repo, and a running Remote Control server, from a form in the conversation.",
-  "author": { "name": "Rafe" },
-  "repository": { "type": "git", "url": "https://github.com/RafeSymonds/rc-tmux" },
+  "version": "0.2.0",
+  "description": "Manage rc-tmux from Claude: a status dashboard with restart, stop and start, and a form for new projects (folder, git and GitHub repo, running Remote Control server).",
+  "author": {
+    "name": "Rafe"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RafeSymonds/rc-tmux"
+  },
   "server": {
     "type": "node",
     "entry_point": "server.mjs",
     "mcp_config": {
       "command": "node",
-      "args": ["${__dirname}/server.mjs"],
-      "env": { "RC_HOSTS": "${user_config.hosts}" }
+      "args": [
+        "${__dirname}/server.mjs"
+      ],
+      "env": {
+        "RC_HOSTS": "${user_config.hosts}"
+      }
     }
   },
   "tools": [
-    { "name": "new_project_form", "description": "Show the new-project form" },
-    { "name": "create_project", "description": "Create a project with rct new over SSH" },
-    { "name": "project_status", "description": "Check on a project being created" }
+    {
+      "name": "rc_status",
+      "description": "Show every rc-tmux session in a dashboard"
+    },
+    {
+      "name": "rc_start",
+      "description": "Start a session"
+    },
+    {
+      "name": "rc_stop",
+      "description": "Stop a session"
+    },
+    {
+      "name": "rc_restart",
+      "description": "Restart a session"
+    },
+    {
+      "name": "rc_log",
+      "description": "A session's screen and log"
+    },
+    {
+      "name": "new_project_form",
+      "description": "Show the new-project form"
+    },
+    {
+      "name": "create_project",
+      "description": "Create a project with rct new over SSH"
+    },
+    {
+      "name": "project_status",
+      "description": "Check on a project being created"
+    }
   ],
   "user_config": {
     "hosts": {
@@ -29,6 +67,38 @@
       "required": false
     }
   },
-  "compatibility": { "platforms": ["darwin", "linux"], "runtimes": { "node": ">=18.0.0" } },
-  "license": "MIT"
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "license": "MIT",
+  "prompts": [
+    {
+      "name": "rc-status",
+      "description": "Show every rc-tmux session and its state",
+      "text": "Show my rc-tmux sessions with the rc_status tool."
+    },
+    {
+      "name": "rc-new",
+      "description": "Start a new rc-tmux project",
+      "arguments": [
+        "name",
+        "repo"
+      ],
+      "text": "Start a new rc-tmux project: show the new_project_form tool with name ${arguments.name} and repo ${arguments.repo}."
+    },
+    {
+      "name": "rc-restart",
+      "description": "Restart an rc-tmux session",
+      "arguments": [
+        "name"
+      ],
+      "text": "Restart my rc-tmux session ${arguments.name} with rc_restart, then show rc_status."
+    }
+  ]
 }

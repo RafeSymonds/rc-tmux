@@ -1,15 +1,29 @@
 #!/usr/bin/env bash
-# Stands in for `rct new` in tests: prints what the real one prints.
-[ "$1" = new ] || { echo "rct: stub only knows new" >&2; exit 2; }
-name="$2"; shift 2
-echo "rct: created /Users/me/$name"
-case "$name" in
-  fail*) echo "rct: GitHub repo $name already exists" >&2; exit 1 ;;
+# Stands in for rct in tests: prints what the real one prints.
+cmd="$1"; shift
+case "$cmd" in
+new)
+    name="$1"; shift
+    echo "rct: created /Users/me/$name"
+    case "$name" in fail*) echo "rct: GitHub repo $name already exists" >&2; exit 1 ;; esac
+    sleep 1
+    repo="$name"; while [ $# -gt 0 ]; do [ "$1" = --repo ] && repo="$2"; shift; done
+    echo "https://github.com/someone/${repo##*/}"
+    echo "rct: added to /Users/me/.config/rc-tmux/sessions.conf: $name ~/$name"
+    echo "rct: started $name"
+    echo "rct: $name: answered y to: Trust /Users/me/$name? [y/N]"
+    echo "rct: open: https://claude.ai/code?environment=env_01TEST$name" ;;
+ls)
+    [ "$1" = --json ] || exit 2
+    echo '{"host":"stubhost","tmux":true,"sessions":[{"name":"api","state":"running","chrome":"on","folder":"/Users/me/api","url":"https://claude.ai/code?environment=env_01API","question":null},{"name":"home","state":"prompt","chrome":"off","folder":"/Users/me","url":null,"question":"Trust /Users/me? [y/N]"}]}' ;;
+up|down|restart)
+    [ "$1" = api ] || [ "$1" = home ] || { echo "rct: no session named '$1' in /Users/me/.config/rc-tmux/sessions.conf for host stubhost" >&2; exit 1; }
+    echo "rct: ${cmd}ed $1" ;;
+screen)
+    [ "$1" = api ] || { echo "rct: no window '$1'" >&2; exit 1; }
+    echo "·✔︎· Connected · api" ;;
+log)
+    [ "$1" = api ] || [ "$1" = home ] || { echo "rct: no session named '$1'" >&2; exit 1; }
+    echo "[2026-11-19 12:00:00] $1: claude remote-control" ;;
+*) echo "rct: stub does not know $cmd" >&2; exit 2 ;;
 esac
-sleep 1
-repo="$name"; while [ $# -gt 0 ]; do [ "$1" = --repo ] && repo="$2"; shift; done
-echo "https://github.com/someone/${repo##*/}"
-echo "rct: added to /Users/me/.config/rc-tmux/sessions.conf: $name ~/$name"
-echo "rct: started $name"
-echo "rct: $name: answered y to: Trust /Users/me/$name? [y/N]"
-echo "rct: open: https://claude.ai/code?environment=env_01TEST$name"

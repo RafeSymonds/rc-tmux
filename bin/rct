@@ -417,18 +417,56 @@ chrome_up() {
 # Status and attach
 # ---------------------------------------------------------------------------
 
+# stopped (no window), prompt (waiting on a question), running, or waiting (the
+# loop is between restarts).
+state_of() {
+    if ! have_window "$1"; then echo stopped
+    elif at_prompt "$1"; then echo prompt
+    elif [ -n "$(claude_pid "$1")" ]; then echo running
+    else echo waiting; fi
+}
+
 status() {
+    [ "${1:-}" = --json ] && { status_json; return; }
     printf '%-20s %-8s %-7s %s\n' NAME STATE CHROME FOLDER
     entries | while IFS="$(printf '\t')" read -r n f o; do
-        local st="stopped"
-        if have_window "$n"; then
-            if at_prompt "$n"; then st="prompt"
-            elif [ -n "$(claude_pid "$n")" ]; then st="running"; else st="waiting"; fi
-        fi
-        printf '%-20s %-8s %-7s %s\n' "$n" "$st" "$(chrome_for "$n" "$o")" "$f"
+        printf '%-20s %-8s %-7s %s\n' "$n" "$(state_of "$n")" "$(chrome_for "$n" "$o")" "$f"
     done
     have_session || echo "(tmux session '$RC_TMUX' not running; rct up starts it)"
     report_prompts
+}
+
+# A JSON string, or null for an empty value. Control characters are dropped.
+json_val() {
+    if [ -z "$1" ]; then printf null; return; fi
+    printf '"%s"' "$(printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g')"
+}
+
+# `rct ls --json`, for the desktop extension:
+# {"host":..,"tmux":true|false,"sessions":[{"name","state","chrome","folder","url","question"}]}
+status_json() {
+    local tmux_up=false
+    have_session && tmux_up=true
+    printf '{"host":%s,"tmux":%s,"sessions":[' "$(json_val "$(host)")" "$tmux_up"
+    entries | {
+        sep=""
+        while IFS="$(printf '\t')" read -r n f o; do
+            st="$(state_of "$n")" q=""
+            [ "$st" = prompt ] && q="$(last_line "$n")"
+            printf '%s{"name":%s,"state":%s,"chrome":%s,"folder":%s,"url":%s,"question":%s}' "$sep" \
+                "$(json_val "$n")" "$(json_val "$st")" "$(json_val "$(chrome_for "$n" "$o")")" \
+                "$(json_val "$f")" "$(json_val "$(env_url "$n")")" "$(json_val "$q")"
+            sep=","
+        done
+    }
+    printf ']}\n'
+}
+
+# The last lines a session's window shows: what `rct a <name>` would show.
+screen() {
+    have_window "$1" || die "no window '$1'"
+    tmux capture-pane -J -p -t "=$RC_TMUX:$1" -S "-${2:-40}" \
+        | awk 'NF { n = NR } { line[NR] = $0 } END { for (i = 1; i <= n; i++) print line[i] }' | tail -n "${2:-40}"
 }
 
 # Names every window stuck on a question, with the command that gets you there.
@@ -593,9 +631,10 @@ rct: one claude remote-control server per folder, in tmux session '$RC_TMUX'
   rct up [name...]            start all (or named) sessions
   rct down [name...]          stop all (or named) sessions, sessions stay resumable ~4h
   rct restart [name...]       restart sessions; with no names, also apply config edits
-  rct ls                      status of every configured session
+  rct ls [--json]             status of every configured session
   rct a [name]                attach to tmux (jump to that window)
-  rct log <name>              tail a session's log
+  rct log <name> [-n lines]   follow a session's log, or print its last lines
+  rct screen <name> [lines]   print what a session's window shows
   rct update                  update claude (and brew weekly), then restart
   rct chrome                  show chrome on/off per session
   rct chrome on|off <name...|all>   switch Chrome for sessions and restart them
@@ -619,9 +658,17 @@ case "$cmd" in
                    [ -n "$new" ] && sleep 8; report_prompts ;;
     down|stop)     for n in $(targets "$@"); do stop_one "$n"; done ;;
     restart)       restart_cmd "$@" ;;
-    ls|status)     status ;;
+    ls|status)     status "$@" ;;
+    screen)        [ $# -ge 1 ] || die "usage: rct screen <name> [lines]"
+                   case "${2:-40}" in *[!0-9]*) die "lines must be a number" ;; esac
+                   screen "$1" "${2:-40}" ;;
     a|attach)      attach "$@" ;;
-    log)           [ $# -eq 1 ] || die "usage: rct log <name>"; tail -n 50 -f "$RC_LOGS/$1.log" ;;
+    log)           [ $# -ge 1 ] || die "usage: rct log <name> [-n lines]"
+                   entry "$1" >/dev/null
+                   if [ "${2:-}" = -n ]; then
+                       case "${3:-50}" in ''|*[!0-9]*) die "lines must be a number" ;; esac
+                       tail -n "${3:-50}" "$RC_LOGS/$1.log" 2>/dev/null || true
+                   else tail -n 50 -f "$RC_LOGS/$1.log"; fi ;;
     update)        do_update 2>&1 | tee -a "$RC_LOGS/update.log" ;;
     chrome)        chrome_cmd "$@" ;;
     new)           new_project "$@" ;;
