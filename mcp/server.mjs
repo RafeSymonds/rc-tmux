@@ -19,7 +19,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { registerAppTool, registerAppResource, RESOURCE_MIME_TYPE } from '@modelcontextprotocol/ext-apps/server';
 import { z } from 'zod';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const here = dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
 
@@ -66,8 +66,10 @@ function page(file) {
 
 function argvFor(host, args) {
   if (host === 'local') return [RCT_LOCAL, ...args];
-  // Every arg already matched a pattern above, so joining with spaces is safe.
-  const remote = `~/.local/bin/rct ${args.join(' ')}; echo "${EXIT_MARK}$?"`;
+  // The remote shell reads this line, so each arg goes in single quotes; the
+  // tools' patterns keep quotes and newlines out of every arg.
+  if (args.some(a => /['\n\0]/.test(a))) throw new Error('an argument holds a quote or a newline');
+  const remote = `~/.local/bin/rct ${args.map(a => `'${a}'`).join(' ')}; echo "${EXIT_MARK}$?"`;
   return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, remote];
 }
 
@@ -80,7 +82,8 @@ function settle(text, code) {
   };
 }
 
-// Runs rct and resolves { exit, stdout, stderr } once it ends.
+// Runs rct and resolves { exit, stdout, stderr, reached } once it ends.
+// `reached` is false when SSH never got to the machine: no exit mark came back.
 function runRct(host, args, timeoutMs = CALL_TIMEOUT_MS) {
   return new Promise(resolve => {
     const [cmd, ...rest] = argvFor(host, args);
@@ -92,8 +95,9 @@ function runRct(host, args, timeoutMs = CALL_TIMEOUT_MS) {
     child.on('error', err => { stderr += `\n${err.message}`; });
     child.on('close', code => {
       clearTimeout(timer);
+      const reached = host === 'local' ? code !== null : stdout.includes(EXIT_MARK);
       const out = settle(stdout, code);
-      resolve({ exit: code === null ? 124 : out.exit, stdout: out.text, stderr: stderr.trim() });
+      resolve({ exit: code === null ? 124 : out.exit, stdout: out.text, stderr: stderr.trim(), reached });
     });
   });
 }
@@ -165,23 +169,55 @@ function jobText(job) {
 
 // --- Status ---
 
-async function hostStatus(host) {
-  const r = await runRct(host, ['ls', '--json']);
-  if (r.exit !== 0) return { host, ok: false, error: rctError(r.stderr) ?? (r.stderr || `rct ls failed (${r.exit})`) };
+const LOW_DISK_KB = 5 * 1024 * 1024;   // warn under 5 GB free
+
+// Free disk, load and Chrome, with what deserves a warning already worked out.
+function healthOf(r, sessions) {
+  if (r.exit !== 0) return null;   // an older rct without `health`: leave the strip out
   try {
-    const data = JSON.parse(r.stdout);
-    return { host, ok: true, machine: data.host, tmux: data.tmux, sessions: data.sessions };
+    const h = JSON.parse(r.stdout);
+    const warnings = [];
+    if (h.diskFreeKB !== null && h.diskFreeKB < LOW_DISK_KB) warnings.push('low disk');
+    if (h.load !== null && h.cpus && h.load > h.cpus) warnings.push('high load');
+    if (!h.chrome && sessions.some(s => s.chrome === 'on')) warnings.push('Chrome not running');
+    return { ...h, warnings };
+  } catch {
+    return null;
+  }
+}
+
+async function hostStatus(host) {
+  const [ls, health] = await Promise.all([runRct(host, ['ls', '--json']), runRct(host, ['health', '--json'])]);
+  if (!ls.reached) {
+    return { host, ok: false, offline: true, error: `can't reach ${host}: ${ls.stderr.split('\n').at(-1) || 'no answer over SSH'}` };
+  }
+  if (ls.exit !== 0) return { host, ok: false, error: rctError(ls.stderr) ?? (ls.stderr || `rct ls failed (${ls.exit})`) };
+  try {
+    const data = JSON.parse(ls.stdout);
+    return { host, ok: true, machine: data.host, tmux: data.tmux, sessions: data.sessions, health: healthOf(health, data.sessions) };
   } catch {
     return { host, ok: false, error: `rct on ${host} has no ls --json; update rc-tmux there (git pull)` };
   }
 }
 
+const gb = kb => `${(kb / 1024 / 1024).toFixed(1)} GB`;
+
+function healthLine(h) {
+  if (!h) return null;
+  const parts = [];
+  if (h.diskFreeKB !== null) parts.push(`${gb(h.diskFreeKB)} free of ${gb(h.diskSizeKB)}`);
+  if (h.load !== null) parts.push(`load ${h.load}${h.cpus ? ` on ${h.cpus} CPUs` : ''}`);
+  parts.push(h.chrome ? 'Chrome running' : 'Chrome not running');
+  return parts.join(' · ') + (h.warnings.length ? `  (warning: ${h.warnings.join(', ')})` : '');
+}
+
 function statusText(hosts) {
   return hosts.map(h => {
-    if (!h.ok) return `${h.host}: ${h.error}`;
+    if (!h.ok) return `${h.host}: ${h.offline ? 'OFFLINE. ' : ''}${h.error}`;
     const rows = h.sessions.map(s => `  ${s.name.padEnd(16)} ${s.state.padEnd(8)} ${s.folder}`
       + (s.question ? `\n    waiting on: ${s.question}` : ''));
-    return [`${h.host}${h.tmux ? '' : ' (tmux not running)'}:`, ...rows].join('\n');
+    const line = healthLine(h.health);
+    return [`${h.host}${h.tmux ? '' : ' (tmux not running)'}:`, ...(line ? [`  ${line}`] : []), ...rows].join('\n');
   }).join('\n\n');
 }
 
@@ -257,8 +293,9 @@ function buildServer() {
   registerAppTool(server, 'rc_status', {
     title: 'rc-tmux status',
     description: 'Show every rc-tmux session on the user\'s machines: state (running, prompt = waiting on a question, '
-      + 'waiting = between restarts, stopped), folder, and its claude.ai link, in a dashboard with Restart, Stop, '
-      + 'Start and Screen buttons. Leave host out to show every machine.',
+      + 'waiting = between restarts, stopped), folder, and its claude.ai link, plus each machine\'s health (online, '
+      + 'free disk, load, Chrome running), in a dashboard with Restart, Stop, Start and Screen buttons and a '
+      + 'largest-folders view. Leave host out to show every machine.',
     inputSchema: { host: hostArg },
     annotations: { readOnlyHint: true, openWorldHint: true },
     _meta: { ui: { resourceUri: UI_STATUS } },
@@ -303,6 +340,32 @@ function buildServer() {
       content: [{ type: 'text', text: `Screen:\n${shown}\n\nLog:\n${log.stdout}` }],
       structuredContent: { host, name, screen: shown, log: log.stdout },
     };
+  });
+
+  server.registerTool('rc_big', {
+    title: 'Largest folders on an rc-tmux machine',
+    description: 'List the largest entries in a folder on the machine (default its home folder), biggest first, '
+      + 'to find what fills the disk. Read-only: it never deletes. Takes up to a minute on a big home folder. '
+      + 'Call again with a path from the result to look inside it.',
+    inputSchema: {
+      host: hostArg,
+      path: z.string().regex(/^(~|~\/[^'\n\0]*|\/[^'\n\0]*)$/).max(500).optional()
+        .describe('Folder: absolute, or starting with ~/. Default ~.'),
+    },
+    annotations: { readOnlyHint: true, openWorldHint: true },
+  }, async ({ host = HOSTS[0], path = '~' }) => {
+    if (!known(host)) return fail(`Unknown machine ${host}. Machines: ${HOSTS.join(', ')}.`);
+    const r = await runRct(host, ['big', path, '15'], 150 * 1000);
+    if (!r.reached) return fail(`Can't reach ${host}.`);
+    if (r.exit !== 0) return fail(rctError(r.stderr) ?? `rct big failed (${r.exit})`);
+    const base = path.replace(/\/+$/, '');
+    const entries = r.stdout.split('\n').filter(Boolean).map(line => {
+      const [kb, ...rest] = line.split('\t');
+      const name = rest.join('\t');
+      return { kb: Number(kb), name, path: `${base}/${name}` };
+    });
+    const text = entries.map(e => `${gb(e.kb).padStart(9)}  ${e.name}`).join('\n') || '(empty)';
+    return { content: [{ type: 'text', text: `Largest in ${path} on ${host}:\n${text}` }], structuredContent: { host, path, entries } };
   });
 
   registerAppResource(server, 'New project form', UI_NEW, { description: 'Form and progress view for new rc-tmux projects' },

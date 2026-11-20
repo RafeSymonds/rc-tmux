@@ -462,6 +462,36 @@ status_json() {
     printf ']}\n'
 }
 
+# `rct health --json`: free disk (KB) in the home folder's volume, the 1-minute
+# load, CPU count and whether Chrome is running, for the desktop extension.
+health_json() {
+    local avail size load cpus chrome=false
+    # shellcheck disable=SC2046
+    set -- $(df -kP "$HOME" | awk 'NR == 2 { print $4, $2 }')
+    avail="${1:-null}" size="${2:-null}"
+    load="$(LC_ALL=C uptime | sed -E 's/.*load averages?: *//' | awk -F'[ ,]+' '{ print $1 }')"
+    case "$load" in ''|*[!0-9.]*) load=null ;; esac
+    cpus="$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null)"
+    case "$cpus" in ''|*[!0-9]*) cpus=null ;; esac
+    case "$(uname -s)" in
+        Darwin) pgrep -xq "${RC_CHROME_APP:-Google Chrome}" && chrome=true ;;
+        *)      pgrep -f 'chrome|chromium' >/dev/null 2>&1 && chrome=true ;;
+    esac
+    printf '{"host":%s,"diskFreeKB":%s,"diskSizeKB":%s,"load":%s,"cpus":%s,"chrome":%s}\n' \
+        "$(json_val "$(host)")" "$avail" "$size" "$load" "$cpus" "$chrome"
+}
+
+# `rct big [folder] [count]`: the largest entries in a folder (default home),
+# biggest first, as "KB<TAB>name". It only lists; it never deletes. Stays on one
+# volume (-x). Slow on a big home folder, so it runs only when asked.
+big() {
+    local dir="${1:-$HOME}" n="${2:-12}"
+    case "$dir" in "~") dir="$HOME" ;; "~"/*) dir="$HOME/${dir#\~/}" ;; esac
+    [ -d "$dir" ] || die "not a folder: $dir"
+    case "$n" in ''|*[!0-9]*) die "count must be a number" ;; esac
+    ( cd "$dir" && du -skx -- * .[!.]* ..?* 2>/dev/null ) | sort -rn | head -n "$n"
+}
+
 # The last lines a session's window shows: what `rct a <name>` would show.
 screen() {
     have_window "$1" || die "no window '$1'"
@@ -635,6 +665,8 @@ rct: one claude remote-control server per folder, in tmux session '$RC_TMUX'
   rct a [name]                attach to tmux (jump to that window)
   rct log <name> [-n lines]   follow a session's log, or print its last lines
   rct screen <name> [lines]   print what a session's window shows
+  rct health --json           free disk, load, CPUs and whether Chrome runs
+  rct big [folder] [count]    the largest entries in a folder (default home); lists only
   rct update                  update claude (and brew weekly), then restart
   rct chrome                  show chrome on/off per session
   rct chrome on|off <name...|all>   switch Chrome for sessions and restart them
@@ -659,6 +691,8 @@ case "$cmd" in
     down|stop)     for n in $(targets "$@"); do stop_one "$n"; done ;;
     restart)       restart_cmd "$@" ;;
     ls|status)     status "$@" ;;
+    health)        [ "${1:-}" = --json ] || die "usage: rct health --json"; health_json ;;
+    big)           big "$@" ;;
     screen)        [ $# -ge 1 ] || die "usage: rct screen <name> [lines]"
                    case "${2:-40}" in *[!0-9]*) die "lines must be a number" ;; esac
                    screen "$1" "${2:-40}" ;;

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Fake ssh for tests: runs the remote command here with the stub as rct, and,
 # like Tailscale SSH, always exits 0.
+host="${@: -2:1}"
+if [ "$host" = down ]; then echo "ssh: connect to host down port 22: Operation timed out" >&2; exit 255; fi
 cmd="${@: -1}"
 cmd="${cmd//\~\/.local\/bin\/rct/$STUB_RCT}"
 bash -c "$cmd"

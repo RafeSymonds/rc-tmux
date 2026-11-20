@@ -2,7 +2,7 @@
   "manifest_version": "0.2",
   "name": "rc-tmux",
   "display_name": "rc-tmux",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Manage rc-tmux from Claude: a status dashboard with restart, stop and start, and a form for new projects (folder, git and GitHub repo, running Remote Control server).",
   "author": {
     "name": "Rafe"
@@ -27,7 +27,7 @@
   "tools": [
     {
       "name": "rc_status",
-      "description": "Show every rc-tmux session in a dashboard"
+      "description": "Show every rc-tmux session and each machine's health in a dashboard"
     },
     {
       "name": "rc_start",
@@ -44,6 +44,10 @@
     {
       "name": "rc_log",
       "description": "A session's screen and log"
+    },
+    {
+      "name": "rc_big",
+      "description": "The largest folders on a machine (lists only)"
     },
     {
       "name": "new_project_form",

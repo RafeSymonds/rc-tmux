@@ -19,6 +19,11 @@ ls)
 up|down|restart)
     [ "$1" = api ] || [ "$1" = home ] || { echo "rct: no session named '$1' in /Users/me/.config/rc-tmux/sessions.conf for host stubhost" >&2; exit 1; }
     echo "rct: ${cmd}ed $1" ;;
+health)
+    echo '{"host":"stubhost","diskFreeKB":4000000,"diskSizeKB":239362496,"load":2.5,"cpus":10,"chrome":false}' ;;
+big)
+    [ "$1" = '~' ] || [ "$1" = '~/games' ] || { echo "rct: not a folder: $1" >&2; exit 1; }
+    printf '26353340\trocket league\n3621512\tscreeps\n' ;;
 screen)
     [ "$1" = api ] || { echo "rct: no window '$1'" >&2; exit 1; }
     echo "·✔︎· Connected · api" ;;

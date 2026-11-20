@@ -30,6 +30,18 @@ button.sm { height: 28px; padding: 0 10px; font-size: 13px; }
 .q code { font-family: var(--font-mono, ui-monospace, monospace); }
 .msg { margin-top: 6px; font-size: 12px; }
 .empty { padding: 12px; color: var(--muted); }
+.host-head .grow { flex: 1; }
+.health { display: flex; gap: 14px; flex-wrap: wrap; padding: 8px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--border); }
+.health .warn { color: var(--warning); font-weight: 600; }
+.offline { color: var(--danger); font-weight: 600; }
+.big { padding: 8px 12px 10px; border-top: 1px solid var(--border); font-size: 13px; }
+.big-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
+.big-head code { font-family: var(--font-mono, ui-monospace, monospace); color: var(--text); }
+.big-row { display: flex; gap: 10px; width: 100%; height: auto; padding: 4px 6px; border: 0; border-radius: 6px; text-align: left; }
+.big-row:hover { background: var(--bg-2); }
+.big-row .kb { min-width: 72px; text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.big-row .bar { flex: 0 0 80px; align-self: center; height: 6px; border-radius: 3px; background: var(--bg-2); overflow: hidden; }
+.big-row .bar i { display: block; height: 100%; background: var(--muted); }
 </style>
 </head>
 <body>
@@ -46,10 +58,11 @@ button.sm { height: 28px; padding: 0 10px; font-size: 13px; }
 <script type="module">
   const { App, applyDocumentTheme, applyHostStyleVariables, applyHostFonts } = window.McpApps;
   const $ = id => document.getElementById(id);
-  const app = new App({ name: 'rc-tmux status', version: '0.2.0' });
+  const app = new App({ name: 'rc-tmux status', version: '0.3.0' });
   const busy = new Map();      // "host/name" -> action label while an action runs
   const notes = new Map();     // "host/name" -> { text, bad } after an action
   const screens = new Map();   // "host/name" -> screen text while open
+  const bigs = new Map();      // host -> { path, entries, loading, error } while the folder list is open
   let data = null, onlyHost = undefined, loading = false;
 
   const theme = ctx => {
@@ -71,11 +84,61 @@ button.sm { height: 28px; padding: 0 10px; font-size: 13px; }
     $('when').textContent = `Updated ${new Date(data.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`;
     $('hosts').replaceChildren(...data.hosts.map(h => {
       const head = el('div', { className: 'host-head' }, el('b', { textContent: h.host }),
-        h.ok && el('span', { textContent: `${h.sessions.length} sessions${h.tmux ? '' : ' · tmux not running'}` }));
+        h.offline ? el('span', { className: 'offline', textContent: 'offline' })
+          : h.ok && el('span', { textContent: `${h.sessions.length} sessions${h.tmux ? '' : ' · tmux not running'}` }),
+        el('span', { className: 'grow' }),
+        h.ok && el('button', { className: 'sm', textContent: bigs.has(h.host) ? 'Hide folders' : 'Largest folders',
+          onclick: () => toggleBig(h.host) }));
       if (!h.ok) return el('div', { className: 'host' }, head, el('div', { className: 'empty err', textContent: h.error }));
-      if (!h.sessions.length) return el('div', { className: 'host' }, head, el('div', { className: 'empty', textContent: 'No sessions in its config.' }));
-      return el('div', { className: 'host' }, head, ...h.sessions.map(s => row(h.host, s)));
+      const parts = [head, healthStrip(h.health), bigPanel(h.host)];
+      if (!h.sessions.length) parts.push(el('div', { className: 'empty', textContent: 'No sessions in its config.' }));
+      return el('div', { className: 'host' }, ...parts, ...h.sessions.map(s => row(h.host, s)));
     }));
+  }
+
+  const gb = kb => `${(kb / 1024 / 1024).toFixed(1)} GB`;
+
+  function healthStrip(h) {
+    if (!h) return null;
+    const warn = w => h.warnings.includes(w);
+    const item = (text, w) => el('span', { className: w && warn(w) ? 'warn' : '', textContent: text });
+    return el('div', { className: 'health' },
+      h.diskFreeKB !== null && item(`${gb(h.diskFreeKB)} free of ${gb(h.diskSizeKB)}`, 'low disk'),
+      h.load !== null && item(`load ${h.load}${h.cpus ? ` / ${h.cpus} CPUs` : ''}`, 'high load'),
+      item(h.chrome ? 'Chrome running' : 'Chrome not running', 'Chrome not running'));
+  }
+
+  function bigPanel(host) {
+    const b = bigs.get(host);
+    if (!b) return null;
+    const up = b.path !== '~' && b.path !== '/' && el('button', { className: 'sm', textContent: 'Up', disabled: b.loading,
+      onclick: () => loadBig(host, b.path.replace(/\/[^/]+$/, '') || '/') });
+    const head = el('div', { className: 'big-head' }, 'Largest in ', el('code', { textContent: b.path }), up,
+      el('span', { textContent: 'Lists only. Nothing is deleted.' }));
+    if (b.loading) return el('div', { className: 'big' }, head, el('div', { className: 'hint', textContent: 'Measuring… a big folder takes up to a minute.' }));
+    if (b.error) return el('div', { className: 'big' }, head, el('div', { className: 'err', textContent: b.error }));
+    const top = b.entries[0]?.kb || 1;
+    return el('div', { className: 'big' }, head, ...b.entries.map(e => el('button', {
+      className: 'big-row', title: `Look inside ${e.path}`, onclick: () => loadBig(host, e.path),
+    }, el('span', { className: 'kb', textContent: gb(e.kb) }),
+      el('span', { className: 'bar' }, el('i', { style: `width:${Math.max(2, Math.round(e.kb / top * 100))}%` })),
+      el('span', { textContent: e.name }))));
+  }
+
+  async function loadBig(host, path) {
+    bigs.set(host, { path, loading: true }); render();
+    try {
+      const r = await app.callServerTool({ name: 'rc_big', arguments: { host, path } });
+      bigs.set(host, r.isError ? { path, error: r.content?.[0]?.text ?? 'Could not list it.' }
+        : { path, entries: r.structuredContent.entries });
+    } catch (e) {
+      bigs.set(host, { path, error: `Could not list it: ${e.message ?? e}` });
+    }
+    if (bigs.has(host)) render();
+  }
+
+  function toggleBig(host) {
+    if (bigs.has(host)) { bigs.delete(host); render(); } else loadBig(host, '~');
   }
 
   function row(host, s) {

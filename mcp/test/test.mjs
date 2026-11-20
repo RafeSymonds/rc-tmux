@@ -11,7 +11,7 @@ const stub = join(here, 'stub-rct');
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(here, '..', 'server.mjs')],
-  env: { ...process.env, RC_HOSTS: 'mini,local', RCT_BIN: stub, STUB_RCT: stub,
+  env: { ...process.env, RC_HOSTS: 'mini,local,down', RCT_BIN: stub, STUB_RCT: stub,
     PATH: `${join(here, 'bin')}:${process.env.PATH}` },
 });
 const client = new Client({ name: 'test', version: '0' });
@@ -30,11 +30,11 @@ const ok = (label) => { pass++; console.log(`ok ${pass} - ${label}`); };
 
 const { tools } = await client.listTools();
 assert.deepEqual(tools.map(t => t.name).sort(),
-  ['create_project', 'new_project_form', 'project_status', 'rc_log', 'rc_restart', 'rc_start', 'rc_status', 'rc_stop']);
+  ['create_project', 'new_project_form', 'project_status', 'rc_big', 'rc_log', 'rc_restart', 'rc_start', 'rc_status', 'rc_stop']);
 assert.equal(tools.find(t => t.name === 'rc_status')._meta.ui.resourceUri, 'ui://rc-tmux/status');
 const form = tools.find(t => t.name === 'new_project_form');
 assert.equal(form._meta.ui.resourceUri, 'ui://rc-tmux/new-project');
-ok('lists eight tools, the form and status linked to their UIs');
+ok('lists nine tools, the form and status linked to their UIs');
 
 for (const uri of ['ui://rc-tmux/new-project', 'ui://rc-tmux/status']) {
   const res = await client.readResource({ uri });
@@ -46,7 +46,7 @@ for (const uri of ['ui://rc-tmux/new-project', 'ui://rc-tmux/status']) {
 ok('both UI pages inline the client and the base styles');
 
 const f = await client.callTool({ name: 'new_project_form', arguments: { name: 'recipes' } });
-assert.deepEqual(f.structuredContent, { view: 'form', hosts: ['mini', 'local'], defaults: { name: 'recipes' } });
+assert.deepEqual(f.structuredContent, { view: 'form', hosts: ['mini', 'local', 'down'], defaults: { name: 'recipes' } });
 ok('form returns hosts and prefill');
 
 const bad = await client.callTool({ name: 'create_project', arguments: { name: 'a b' } });
@@ -79,15 +79,30 @@ ok('host local: done and failed from the exit code');
 
 const st = await client.callTool({ name: 'rc_status', arguments: {} });
 assert.equal(st.structuredContent.view, 'status');
-assert.equal(st.structuredContent.hosts.length, 2);
-for (const h of st.structuredContent.hosts) {
+assert.equal(st.structuredContent.hosts.length, 3);
+for (const h of st.structuredContent.hosts.slice(0, 2)) {
   assert.ok(h.ok, h.error);
   assert.deepEqual(h.sessions.map(x => x.state), ['running', 'prompt']);
+  assert.deepEqual(h.health.warnings, ['low disk', 'Chrome not running']);
 }
+const down = st.structuredContent.hosts[2];
+assert.equal(down.ok, false); assert.equal(down.offline, true);
+assert.match(down.error, /can't reach down: .*timed out/);
+assert.match(st.content[0].text, /down: OFFLINE/);
+assert.match(st.content[0].text, /3\.8 GB free of 228\.3 GB · load 2\.5 on 10 CPUs · Chrome not running {2}\(warning: low disk, Chrome not running\)/);
 assert.match(st.content[0].text, /waiting on: Trust \/Users\/me\? \[y\/N\]/);
 const one = await client.callTool({ name: 'rc_status', arguments: { host: 'mini' } });
 assert.equal(one.structuredContent.hosts.length, 1);
-ok('rc_status: every machine, or one, with states and the waiting question');
+ok('rc_status: every machine, or one, with states, the waiting question, health warnings and an offline machine');
+
+const big = await client.callTool({ name: 'rc_big', arguments: {} });
+assert.deepEqual(big.structuredContent.entries, [
+  { kb: 26353340, name: 'rocket league', path: '~/rocket league' }, { kb: 3621512, name: 'screeps', path: '~/screeps' }]);
+assert.ok(!(await client.callTool({ name: 'rc_big', arguments: { path: '~/games' } })).isError);
+assert.equal((await client.callTool({ name: 'rc_big', arguments: { path: '/nope' } })).isError, true);
+assert.equal((await client.callTool({ name: 'rc_big', arguments: { path: "~/x'; rm -rf ~" } })).isError, true);
+assert.equal((await client.callTool({ name: 'rc_big', arguments: { host: 'down' } })).isError, true);
+ok('rc_big: lists a folder, refuses a missing folder, a quote and an offline machine');
 
 for (const tool of ['rc_start', 'rc_stop', 'rc_restart']) {
   const good = await client.callTool({ name: tool, arguments: { name: 'api' } });
